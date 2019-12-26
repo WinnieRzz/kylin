@@ -17,15 +17,19 @@
 # limitations under the License.
 #
 
+source ${KYLIN_HOME:-"$(cd -P -- "$(dirname -- "$0")" && pwd -P)/../"}/bin/header.sh
+
+echo Retrieving hbase dependency...
+
 hbase_classpath=`hbase classpath`
 
 # special handling for Amazon EMR, to prevent re-init of hbase-setenv
 is_aws=`uname -r | grep amzn`
-if [ -n is_aws ] && [ -d "/usr/lib/oozie/lib" ]; then
+if [ -n "$is_aws" ] && [ -d "/usr/lib/oozie/lib" ]; then
     export HBASE_ENV_INIT="true"
 fi
 
-arr=(`echo $hbase_classpath | cut -d ":"  --output-delimiter=" " -f 1-`)
+arr=(`echo $hbase_classpath | cut -d ":" -f 1- | sed 's/:/ /g'`)
 hbase_common_path=
 for data in ${arr[@]}
 do
@@ -38,10 +42,11 @@ done
 
 if [ -z "$hbase_common_path" ]
 then
-    echo "hbase-common lib not found"
-    exit 1
+    quit "hbase-common lib not found"
 fi
 
 hbase_dependency=${hbase_common_path}
-echo "hbase dependency: $hbase_dependency"
+verbose "hbase dependency: $hbase_dependency"
 export hbase_dependency
+echo "export HBASE_ENV_INIT=$HBASE_ENV_INIT
+export hbase_dependency=$hbase_dependency" > ${dir}/cached-hbase-dependency.sh

@@ -20,16 +20,36 @@ package org.apache.kylin.common.util;
 
 import java.io.UnsupportedEncodingException;
 import java.nio.ByteBuffer;
+import java.util.Locale;
+
+import com.google.common.primitives.Shorts;
 
 public class BytesUtil {
 
+    private BytesUtil() {
+        throw new IllegalStateException("Class BytesUtil is an utility class !");
+    }
+
     public static final byte[] EMPTY_BYTE_ARRAY = new byte[0];
+
+    public static void writeByte(byte num, byte[] bytes, int offset, int size) {
+        for (int i = offset + size - 1; i >= offset; i--) {
+            bytes[i] = num;
+            num >>>= 8;
+        }
+    }
 
     public static void writeShort(short num, byte[] bytes, int offset, int size) {
         for (int i = offset + size - 1; i >= offset; i--) {
             bytes[i] = (byte) num;
             num >>>= 8;
         }
+    }
+
+    public static byte[] writeShort(short num) {
+        byte[] output = new byte[Shorts.BYTES];
+        writeShort(num, output, 0, output.length);
+        return output;
     }
 
     public static long readShort(byte[] bytes, int offset, int size) {
@@ -41,29 +61,8 @@ public class BytesUtil {
         return num;
     }
 
-    public static void writeLong(long num, byte[] bytes, int offset, int size) {
-        for (int i = offset + size - 1; i >= offset; i--) {
-            bytes[i] = (byte) num;
-            num >>>= 8;
-        }
-    }
-
-    public static long readLong(byte[] bytes, int offset, int size) {
-        long integer = 0;
-        for (int i = offset, n = offset + size; i < n; i++) {
-            integer <<= 8;
-            integer |= (long) bytes[i] & 0xFF;
-        }
-        return integer;
-    }
-
-    public static long readLong(ByteBuffer buffer, int size) {
-        long integer = 0;
-        for (int i = 0; i < size; i++) {
-            integer <<= 8;
-            integer |= (long) buffer.get() & 0xFF;
-        }
-        return integer;
+    public static short readShort(byte[] bytes) {
+        return (short) readShort(bytes, 0, Shorts.BYTES);
     }
 
     public static void writeUnsigned(int num, byte[] bytes, int offset, int size) {
@@ -82,12 +81,29 @@ public class BytesUtil {
         return integer;
     }
 
-    public static void writeSigned(int num, byte[] bytes, int offset, int size) {
-        writeUnsigned(num, bytes, offset, size);
+    public static void writeUnsigned(int num, int size, ByteBuffer out) {
+        int mask = 0xff << ((size - 1) * 8);
+        for (int i = size; i > 0; i--) {
+            int v = (num & mask) >> (i - 1) * 8;
+            out.put((byte) v);
+            mask = mask >> 8;
+        }
     }
 
-    public static int readSigned(byte[] bytes, int offset, int size) {
-        int integer = (bytes[offset] & 0x80) == 0 ? 0 : -1;
+    public static int readUnsigned(ByteBuffer in, int size) {
+        int integer = 0;
+        for (int i = 0; i < size; i++) {
+            integer = integer << 8;
+            integer |= (in.get() & 0xff);
+        }
+
+        return integer;
+    }
+
+    public static int readUnsigned(ByteArray in, int offset, int size) {
+        int integer = 0;
+        offset += in.offset();
+        byte[] bytes = in.array();
         for (int i = offset, n = offset + size; i < n; i++) {
             integer <<= 8;
             integer |= (int) bytes[i] & 0xFF;
@@ -95,10 +111,58 @@ public class BytesUtil {
         return integer;
     }
 
+    public static void writeSignedLong(long num, byte[] bytes, int offset, int size) {
+        writeLong(num, bytes, offset, size);
+    }
+
+    public static long readSignedLong(byte[] bytes, int offset, int size) {
+        long integer = (bytes[offset] & 0x80) == 0 ? 0 : -1;
+        for (int i = offset, n = offset + size; i < n; i++) {
+            integer <<= 8;
+            integer |= (int) bytes[i] & 0xFF;
+        }
+        return integer;
+    }
+
+    public static void writeLong(long num, byte[] bytes, int offset, int size) {
+        for (int i = offset + size - 1; i >= offset; i--) {
+            bytes[i] = (byte) num;
+            num >>>= 8;
+        }
+    }
+
+    public static long readLong(byte[] bytes, int offset, int size) {
+        long integer = 0;
+        for (int i = offset, n = offset + size; i < n; i++) {
+            integer <<= 8;
+            integer |= (long) bytes[i] & 0xFF;
+        }
+        return integer;
+    }
+
+    public static void writeLong(long num, ByteBuffer out) {
+        for (int i = 0; i < 8; i++) {
+            out.put((byte) num);
+            num >>>= 8;
+        }
+    }
+
+    public static long readLong(ByteBuffer in) {
+        long integer = 0;
+        long mask = 0xff;
+        int shift = 0;
+        for (int i = 0; i < 8; i++) {
+            integer |= (in.get() << shift) & mask;
+            mask = mask << 8;
+            shift += 8;
+        }
+        return integer;
+    }
+
     /**
      * No. bytes needed to store a value as big as the given
      */
-    public static int sizeForValue(int maxValue) {
+    public static int sizeForValue(long maxValue) {
         int size = 0;
         while (maxValue > 0) {
             size++;
@@ -119,6 +183,22 @@ public class BytesUtil {
         return r;
     }
 
+    public static byte[] mergeBytes(byte[] bytes1, byte[] bytes2) {
+        if (bytes1 == null && bytes2 == null) {
+            throw new NullPointerException();
+        }
+        if (bytes1 == null) {
+            return bytes2;
+        }
+        if (bytes2 == null) {
+            return bytes1;
+        }
+        byte[] bytes = new byte[bytes1.length + bytes2.length];
+        System.arraycopy(bytes1, 0, bytes, 0, bytes1.length);
+        System.arraycopy(bytes2, 0, bytes, bytes1.length, bytes2.length);
+        return bytes;
+    }
+
     public static int compareBytes(byte[] src, int srcOffset, byte[] dst, int dstOffset, int length) {
         int r = 0;
         for (int i = 0; i < length; i++) {
@@ -127,6 +207,10 @@ public class BytesUtil {
                 break;
         }
         return r;
+    }
+
+    public static boolean isPositiveShort(int i) {
+        return (i & 0xFFFF8000) == 0;
     }
 
     // from WritableUtils
@@ -202,44 +286,6 @@ public class BytesUtil {
             return -119 - value;
         }
         return -111 - value;
-    }
-
-    public static void writeUnsigned(int num, int size, ByteBuffer out) {
-        int mask = 0xff << ((size - 1) * 8);
-        for (int i = size; i > 0; i--) {
-            int v = (num & mask) >> (i - 1) * 8;
-            out.put((byte) v);
-            mask = mask >> 8;
-        }
-    }
-
-    public static int readUnsigned(ByteBuffer in, int size) {
-        int integer = 0;
-        for (int i = 0; i < size; i++) {
-            integer = integer << 8;
-            integer |= (in.get() & 0xff);
-        }
-
-        return integer;
-    }
-
-    public static void writeLong(long num, ByteBuffer out) {
-        for (int i = 0; i < 8; i++) {
-            out.put((byte) num);
-            num >>>= 8;
-        }
-    }
-
-    public static long readLong(ByteBuffer in) {
-        long integer = 0;
-        int mask = 0xff;
-        int shift = 0;
-        for (int i = 0; i < 8; i++) {
-            integer |= (in.get() << shift) & mask;
-            mask = mask << 8;
-            shift += 8;
-        }
-        return integer;
     }
 
     public static void writeUTFString(String str, ByteBuffer out) {
@@ -427,9 +473,24 @@ public class BytesUtil {
         StringBuilder sb = new StringBuilder(length * 4);
         for (int i = 0; i < length; i++) {
             int b = array[offset + i];
-            sb.append(String.format("\\x%02X", b & 0xFF));
+            sb.append(String.format(Locale.ROOT, "\\x%02X", b & 0xFF));
         }
         return sb.toString();
+    }
+
+    /**
+     *
+     * @param hex String value of a byte array in hex, e.g, "\\x00\\x0A";
+     * @return the byte array that the hex represented.
+     */
+    public static byte[] fromHex(String hex) {
+        byte[] b = new byte[hex.length() / 4];
+        for (int i = 0; i < b.length; i++) {
+            int index = i * 4;
+            int v = Integer.parseInt(hex.substring(index + 2, index + 4), 16);
+            b[i] = (byte) v;
+        }
+        return b;
     }
 
 }

@@ -41,10 +41,10 @@ import com.google.common.base.Preconditions;
  */
 public class OLAPLimitRel extends SingleRel implements OLAPRel {
 
-    private final RexNode localOffset; // avoid same name in parent class
-    private final RexNode localFetch; // avoid same name in parent class
-    private ColumnRowType columnRowType;
-    private OLAPContext context;
+    public final RexNode localOffset; // avoid same name in parent class
+    public final RexNode localFetch; // avoid same name in parent class
+    ColumnRowType columnRowType;
+    OLAPContext context;
 
     public OLAPLimitRel(RelOptCluster cluster, RelTraitSet traitSet, RelNode child, RexNode offset, RexNode fetch) {
         super(cluster, traitSet, child);
@@ -66,31 +66,42 @@ public class OLAPLimitRel extends SingleRel implements OLAPRel {
 
     @Override
     public RelWriter explainTerms(RelWriter pw) {
-        return super.explainTerms(pw).itemIf("offset", localOffset, localOffset != null).itemIf("fetch", localFetch, localFetch != null);
+        return super.explainTerms(pw)
+                .item("ctx", context == null ? "" : String.valueOf(context.id) + "@" + context.realization)
+                .itemIf("offset", localOffset, localOffset != null).itemIf("fetch", localFetch, localFetch != null);
     }
 
     @Override
     public void implementOLAP(OLAPImplementor implementor) {
+        implementor.fixSharedOlapTableScan(this);
         implementor.visitChild(getInput(), this);
 
         this.columnRowType = buildColumnRowType();
         this.context = implementor.getContext();
+        this.context.hasLimit = true;
 
-        if (!context.afterSkippedFilter) {
+        // ignore limit after having clause
+        // ignore limit after another limit, e.g. select A, count(*) from (select A,B from fact group by A,B limit 100) limit 10
+        // ignore limit after outer aggregate, e.g. select count(1) from (select A,B from fact group by A,B ) limit 10
+        if (!context.afterHavingClauseFilter && !context.afterLimit && !context.afterOuterAggregate
+                && !context.disableLimitPushdown) {
             Number limitValue = (Number) (((RexLiteral) localFetch).getValue());
             int limit = limitValue.intValue();
             this.context.storageContext.setLimit(limit);
-            this.context.limit = limit;
 
             if (localOffset != null) {
                 Number offsetValue = (Number) (((RexLiteral) localOffset).getValue());
                 int offset = offsetValue.intValue();
                 this.context.storageContext.setOffset(offset);
             }
+
+            context.afterLimit = true;
+        } else {
+            this.context.storageContext.setOverlookOuterLimit();
         }
     }
 
-    private ColumnRowType buildColumnRowType() {
+    ColumnRowType buildColumnRowType() {
         OLAPRel olapChild = (OLAPRel) getInput();
         ColumnRowType inputColumnRowType = olapChild.getColumnRowType();
         return inputColumnRowType;
@@ -135,4 +146,5 @@ public class OLAPLimitRel extends SingleRel implements OLAPRel {
         this.traitSet = this.traitSet.replace(trait);
         return oldTraitSet;
     }
+
 }

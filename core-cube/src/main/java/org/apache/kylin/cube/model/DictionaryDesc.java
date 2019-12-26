@@ -18,6 +18,8 @@
 
 package org.apache.kylin.cube.model;
 
+import java.util.Locale;
+
 import org.apache.kylin.metadata.model.DataModelDesc;
 import org.apache.kylin.metadata.model.TblColRef;
 
@@ -27,7 +29,7 @@ import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
 
 @JsonAutoDetect(fieldVisibility = Visibility.NONE, getterVisibility = Visibility.NONE, isGetterVisibility = Visibility.NONE, setterVisibility = Visibility.NONE)
-public class DictionaryDesc {
+public class DictionaryDesc implements java.io.Serializable {
 
     @JsonProperty("column")
     private String column;
@@ -45,12 +47,12 @@ public class DictionaryDesc {
     void init(CubeDesc cubeDesc) {
         DataModelDesc model = cubeDesc.getModel();
 
-        column = column.toUpperCase();
-        colRef = model.findColumn(column).getRef();
+        column = column.toUpperCase(Locale.ROOT);
+        colRef = model.findColumn(column);
 
         if (reuseColumn != null) {
-            reuseColumn = reuseColumn.toUpperCase();
-            reuseColRef = model.findColumn(reuseColumn).getRef();
+            reuseColumn = reuseColumn.toUpperCase(Locale.ROOT);
+            reuseColRef = model.findColumn(reuseColumn);
         }
     }
 

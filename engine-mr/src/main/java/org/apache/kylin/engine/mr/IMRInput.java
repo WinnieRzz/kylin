@@ -18,21 +18,19 @@
 
 package org.apache.kylin.engine.mr;
 
+import java.util.Collection;
+
+import org.apache.hadoop.mapreduce.InputSplit;
 import org.apache.hadoop.mapreduce.Job;
-import org.apache.kylin.cube.CubeSegment;
-import org.apache.kylin.job.execution.DefaultChainedExecutable;
 import org.apache.kylin.metadata.model.TableDesc;
 
 /**
- * Any ITableSource that wishes to serve as input of MapReduce build engine must adapt to this interface.
+ * Any ISource that wishes to serve as input of MapReduce build engine must adapt to this interface.
  */
-public interface IMRInput {
-
-    /** Return a helper to participate in batch cubing job flow. */
-    public IMRBatchCubingInputSide getBatchCubingInputSide(CubeSegment seg);
+public interface IMRInput extends IInput {
 
     /** Return an InputFormat that reads from specified table. */
-    public IMRTableInputFormat getTableInputFormat(TableDesc table);
+    public IMRTableInputFormat getTableInputFormat(TableDesc table, String uuid);
 
     /**
      * Utility that configures mapper to read from a table.
@@ -43,7 +41,10 @@ public interface IMRInput {
         public void configureJob(Job job);
 
         /** Parse a mapper input object into column values. */
-        public String[] parseMapperInput(Object mapperInput);
+        public Collection<String[]> parseMapperInput(Object mapperInput);
+
+        /** Get the signature for the input split*/
+        public String getInputSplitSignature(InputSplit inputSplit);
     }
 
     /**
@@ -55,15 +56,13 @@ public interface IMRInput {
      * - Phase 3: Build Cube (with FlatTableInputFormat)
      * - Phase 4: Update Metadata & Cleanup
      */
-    public interface IMRBatchCubingInputSide {
+    public interface IMRBatchCubingInputSide extends IBatchCubingInputSide {
 
         /** Return an InputFormat that reads from the intermediate flat table */
         public IMRTableInputFormat getFlatTableInputFormat();
+    }
 
-        /** Add step that creates an intermediate flat table as defined by CubeJoinedFlatTableDesc */
-        public void addStepPhase1_CreateFlatTable(DefaultChainedExecutable jobFlow);
+    public interface IMRBatchMergeInputSide extends IBatchMergeInputSide {
 
-        /** Add step that does necessary clean up, like delete the intermediate flat table */
-        public void addStepPhase4_Cleanup(DefaultChainedExecutable jobFlow);
     }
 }

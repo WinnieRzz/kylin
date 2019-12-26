@@ -19,9 +19,10 @@
 package org.apache.kylin.metadata.filter.function;
 
 import java.lang.reflect.InvocationTargetException;
+import java.util.Locale;
 import java.util.Map;
 
-import org.apache.kylin.metadata.filter.BuildInFunctionTupleFilter;
+import org.apache.kylin.metadata.filter.BuiltInFunctionTupleFilter;
 import org.apache.kylin.metadata.filter.TupleFilter;
 import org.apache.kylin.metadata.filter.UDF.MassInTupleFilter;
 
@@ -44,7 +45,7 @@ public class Functions {
             throw new IllegalStateException("Function name cannot be null");
         }
 
-        name = name.toUpperCase();
+        name = name.toUpperCase(Locale.ROOT);
 
         if (SUPPORTED_UDF.containsKey(name)) {
             try {
@@ -54,7 +55,7 @@ public class Functions {
             }
         }
 
-        return new BuildInFunctionTupleFilter(name);
+        return new BuiltInFunctionTupleFilter(name);
 
     }
 }

@@ -31,12 +31,10 @@ import org.apache.kylin.cube.model.validation.IValidatorRule;
 import org.apache.kylin.cube.model.validation.ResultLevel;
 import org.apache.kylin.cube.model.validation.ValidateContext;
 import org.apache.kylin.measure.topn.TopNMeasureType;
-import org.apache.kylin.metadata.MetadataManager;
-import org.apache.kylin.metadata.model.ColumnDesc;
+import org.apache.kylin.metadata.model.DataModelDesc;
 import org.apache.kylin.metadata.model.FunctionDesc;
 import org.apache.kylin.metadata.model.MeasureDesc;
 import org.apache.kylin.metadata.model.ParameterDesc;
-import org.apache.kylin.metadata.model.TableDesc;
 
 import com.google.common.collect.Lists;
 
@@ -62,7 +60,11 @@ public class FunctionRule implements IValidatorRule<CubeDesc> {
     public void validate(CubeDesc cube, ValidateContext context) {
         List<MeasureDesc> measures = cube.getMeasures();
 
-        List<FunctionDesc> countFuncs = new ArrayList<FunctionDesc>();
+        if (validateMeasureNamesDuplicated(measures, context)) {
+            return;
+        }
+
+        List<FunctionDesc> countStarFuncs = new ArrayList<FunctionDesc>();
 
         Iterator<MeasureDesc> it = measures.iterator();
         while (it.hasNext()) {
@@ -101,8 +103,8 @@ public class FunctionRule implements IValidatorRule<CubeDesc> {
                 context.addResult(ResultLevel.ERROR, ex.getMessage());
             }
 
-            if (func.isCount())
-                countFuncs.add(func);
+            if (func.isCount() && func.getParameter().isConstant())
+                countStarFuncs.add(func);
 
             if (TopNMeasureType.FUNC_TOP_N.equalsIgnoreCase(func.getExpression())) {
                 if (parameter.getNextParameter() == null) {
@@ -122,17 +124,13 @@ public class FunctionRule implements IValidatorRule<CubeDesc> {
                     groupByCol = groupByCol.getNextParameter();
                 }
 
-                if (duplicatedCol.size() > 0) {
-                    context.addResult(ResultLevel.ERROR, "Couldn't use " + duplicatedCol.toString() + " in Top-N as it is already defined as dimension.");
-                    return;
-
-                }
-
             }
         }
 
-        if (countFuncs.size() != 1) {
-            context.addResult(ResultLevel.ERROR, "Must define one and only one count(1) function, but there are " + countFuncs.size() + " -- " + countFuncs);
+
+        if (countStarFuncs.size() != 1) {
+            context.addResult(ResultLevel.ERROR, "Must define one and only one count(1) function, but there are "
+                    + countStarFuncs.size() + " -- " + countStarFuncs);
         }
     }
 
@@ -155,34 +153,27 @@ public class FunctionRule implements IValidatorRule<CubeDesc> {
      * @param value
      */
     private void validateColumnParameter(ValidateContext context, CubeDesc cube, String value) {
-        String factTable = cube.getFactTable();
-        if (StringUtils.isEmpty(factTable)) {
-            context.addResult(ResultLevel.ERROR, "Fact table can not be null.");
-            return;
+        DataModelDesc model = cube.getModel();
+        try {
+            model.findColumn(value);
+        } catch (IllegalArgumentException e) {
+            context.addResult(ResultLevel.ERROR, e.getMessage());
         }
-        TableDesc table = MetadataManager.getInstance(cube.getConfig()).getTableDesc(factTable);
-        if (table == null) {
-            context.addResult(ResultLevel.ERROR, "Fact table can not be found: " + cube);
-            return;
-        }
-        // Prepare column set
-        Set<String> set = new HashSet<String>();
-        ColumnDesc[] cdesc = table.getColumns();
-        for (int i = 0; i < cdesc.length; i++) {
-            ColumnDesc columnDesc = cdesc[i];
-            set.add(columnDesc.getName());
-        }
+    }
 
-        String[] items = value.split(",");
-        for (int i = 0; i < items.length; i++) {
-            String item = items[i].trim();
-            if (StringUtils.isEmpty(item)) {
-                continue;
-            }
-            if (!set.contains(item)) {
-                context.addResult(ResultLevel.ERROR, "Column [" + item + "] does not exist in factable table" + factTable);
+    /**
+     * @param measures
+     */
+    private boolean validateMeasureNamesDuplicated(List<MeasureDesc> measures, ValidateContext context) {
+        Set<String> nameSet = new HashSet<>();
+        for (MeasureDesc measure: measures){
+            if (nameSet.contains(measure.getName())){
+                context.addResult(ResultLevel.ERROR, "There is duplicated measure's name: " + measure.getName());
+                return true;
+            } else {
+                nameSet.add(measure.getName());
             }
         }
-
+        return false;
     }
 }

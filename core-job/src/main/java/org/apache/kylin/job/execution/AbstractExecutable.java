@@ -23,15 +23,22 @@ import java.io.StringWriter;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
-import java.util.UUID;
+import java.util.concurrent.TimeUnit;
+import java.util.regex.Matcher;
 
 import org.apache.commons.lang.StringUtils;
-import org.apache.commons.lang3.tuple.Pair;
+import org.apache.commons.lang3.ArrayUtils;
 import org.apache.kylin.common.KylinConfig;
 import org.apache.kylin.common.util.MailService;
+import org.apache.kylin.common.util.Pair;
+import org.apache.kylin.common.util.RandomUtil;
+import org.apache.kylin.common.util.StringUtil;
+import org.apache.kylin.cube.CubeInstance;
+import org.apache.kylin.cube.CubeManager;
 import org.apache.kylin.job.exception.ExecuteException;
+import org.apache.kylin.job.exception.PersistentException;
 import org.apache.kylin.job.impl.threadpool.DefaultContext;
-import org.apache.kylin.job.manager.ExecutableManager;
+import org.apache.kylin.job.util.MailNotificationUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -44,93 +51,203 @@ import com.google.common.collect.Maps;
  */
 public abstract class AbstractExecutable implements Executable, Idempotent {
 
+    public static final Integer DEFAULT_PRIORITY = 10;
+
+    public static final String CUBE_NAME = "cubeName";
     protected static final String SUBMITTER = "submitter";
     protected static final String NOTIFY_LIST = "notify_list";
     protected static final String START_TIME = "startTime";
     protected static final String END_TIME = "endTime";
+    protected static final String INTERRUPT_TIME = "interruptTime";
+    protected static final String BUILD_INSTANCE = "buildInstance";
 
-    private static final Logger logger = LoggerFactory.getLogger(AbstractExecutable.class);
+    protected static final Logger logger = LoggerFactory.getLogger(AbstractExecutable.class);
+    public static final String NO_NEED_TO_SEND_EMAIL_USER_LIST_IS_EMPTY = "no need to send email, user list is empty";
     protected int retry = 0;
 
+    private KylinConfig config;
     private String name;
     private String id;
+    private AbstractExecutable parentExecutable = null;
     private Map<String, String> params = Maps.newHashMap();
-
-    protected static ExecutableManager executableManager = ExecutableManager.getInstance(KylinConfig.getInstanceFromEnv());
+    protected Integer priority;
 
     public AbstractExecutable() {
-        setId(UUID.randomUUID().toString());
+        setId(RandomUtil.randomUUID().toString());
+    }
+
+    protected void initConfig(KylinConfig config) {
+        Preconditions.checkState(this.config == null || this.config == config);
+        this.config = config;
+    }
+
+    protected KylinConfig getConfig() {
+        return config;
+    }
+
+    protected ExecutableManager getManager() {
+        return ExecutableManager.getInstance(config);
     }
 
     protected void onExecuteStart(ExecutableContext executableContext) {
         Map<String, String> info = Maps.newHashMap();
         info.put(START_TIME, Long.toString(System.currentTimeMillis()));
-        executableManager.updateJobOutput(getId(), ExecutableState.RUNNING, info, null);
+        getManager().updateJobOutput(getId(), ExecutableState.RUNNING, info, null);
+    }
+
+    public KylinConfig getCubeSpecificConfig() {
+        String cubeName = getCubeName();
+        CubeManager manager = CubeManager.getInstance(KylinConfig.getInstanceFromEnv());
+        CubeInstance cube = manager.getCube(cubeName);
+        return cube.getConfig();
+    }
+
+    private void onExecuteFinishedWithRetry(ExecuteResult result, ExecutableContext executableContext)
+            throws ExecuteException {
+        Throwable exception;
+        int nRetry = 0;
+        do {
+            nRetry++;
+            exception = null;
+            try {
+                onExecuteFinished(result, executableContext);
+            } catch (Exception e) {
+                logger.error(nRetry + "th retries for onExecuteFinished fails due to {}", e);
+                if (isMetaDataPersistException(e, 5)) {
+                    exception = e;
+                    try {
+                        Thread.sleep(1000L * (long) Math.pow(4, nRetry));
+                    } catch (InterruptedException e1) {
+                        throw new IllegalStateException(e1);
+                    }
+                } else {
+                    throw e;
+                }
+            }
+        } while (exception != null && nRetry <= executableContext.getConfig().getJobMetadataPersistRetry());
+
+        if (exception != null) {
+            handleMetadataPersistException(executableContext, exception);
+            throw new ExecuteException(exception);
+        }
     }
 
     protected void onExecuteFinished(ExecuteResult result, ExecutableContext executableContext) {
         setEndTime(System.currentTimeMillis());
-        if (!isDiscarded()) {
+        if (!isDiscarded() && !isRunnable()) {
             if (result.succeed()) {
-                executableManager.updateJobOutput(getId(), ExecutableState.SUCCEED, null, result.output());
+                getManager().updateJobOutput(getId(), ExecutableState.SUCCEED, null, result.output());
             } else {
-                executableManager.updateJobOutput(getId(), ExecutableState.ERROR, null, result.output());
+                getManager().updateJobOutput(getId(), ExecutableState.ERROR, null, result.output());
             }
         }
     }
 
     protected void onExecuteError(Throwable exception, ExecutableContext executableContext) {
         if (!isDiscarded()) {
-            executableManager.addJobInfo(getId(), END_TIME, Long.toString(System.currentTimeMillis()));
+            getManager().addJobInfo(getId(), END_TIME, Long.toString(System.currentTimeMillis()));
             String output = null;
             if (exception != null) {
                 final StringWriter out = new StringWriter();
                 exception.printStackTrace(new PrintWriter(out));
                 output = out.toString();
             }
-            executableManager.updateJobOutput(getId(), ExecutableState.ERROR, null, output);
+            getManager().updateJobOutput(getId(), ExecutableState.ERROR, null, output);
         }
     }
 
     @Override
     public final ExecuteResult execute(ExecutableContext executableContext) throws ExecuteException {
 
-        logger.info("Executing AbstractExecutable (" + this.getName() + ")");
+        logger.info("Executing AbstractExecutable ({})", this.getName());
 
         Preconditions.checkArgument(executableContext instanceof DefaultContext);
         ExecuteResult result = null;
 
-        onExecuteStart(executableContext);
-        Throwable exception;
-        do {
-            if (retry > 0) {
-                logger.info("Retry " + retry);
-            }
-            exception = null;
-            result = null;
-            try {
-                result = doWork(executableContext);
-            } catch (Throwable e) {
-                logger.error("error running Executable: " + this.toString());
-                exception = e;
-            }
-            retry++;
-        } while (((result != null && result.succeed() == false) || exception != null) && needRetry() == true);
+        try {
+            onExecuteStart(executableContext);
+            Throwable catchedException;
+            Throwable realException;
+            do {
+                if (retry > 0) {
+                    pauseOnRetry();
+                    logger.info("Begin to retry, retry time: {}", retry);
+                }
+                catchedException = null;
+                result = null;
+                try {
+                    result = doWork(executableContext);
+                } catch (Throwable e) {
+                    logger.error("error running Executable: {}", this.toString());
+                    catchedException = e;
+                }
+                retry++;
+                realException = catchedException != null ? catchedException
+                        : (result.getThrowable() != null ? result.getThrowable() : null);
 
-        if (exception != null) {
-            onExecuteError(exception, executableContext);
-            throw new ExecuteException(exception);
+                //don't invoke retry on ChainedExecutable
+            } while (needRetry(this.retry, realException)); //exception in ExecuteResult should handle by user itself.
+
+            //check exception in result to avoid retry on ChainedExecutable(only need to retry on subtask actually)
+            if (realException != null) {
+                onExecuteError(realException, executableContext);
+                throw new ExecuteException(realException);
+            }
+
+            onExecuteFinishedWithRetry(result, executableContext);
+        } catch (ExecuteException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new ExecuteException(e);
         }
-
-        onExecuteFinished(result, executableContext);
         return result;
     }
 
-    protected abstract ExecuteResult doWork(ExecutableContext context) throws ExecuteException;
+    protected void handleMetadataPersistException(ExecutableContext context, Throwable exception) {
+        final String[] adminDls = context.getConfig().getAdminDls();
+        if (adminDls == null || adminDls.length < 1) {
+            logger.warn(NO_NEED_TO_SEND_EMAIL_USER_LIST_IS_EMPTY);
+            return;
+        }
+        List<String> users = Lists.newArrayList(adminDls);
+
+        Map<String, Object> dataMap = Maps.newHashMap();
+        dataMap.put("job_name", getName());
+        dataMap.put("env_name", context.getConfig().getDeployEnv());
+        dataMap.put(SUBMITTER, StringUtil.noBlank(getSubmitter(), "missing submitter"));
+        dataMap.put("job_engine", MailNotificationUtil.getLocalHostName());
+        dataMap.put("error_log",
+                Matcher.quoteReplacement(StringUtil.noBlank(exception.getMessage(), "no error message")));
+
+        String content = MailNotificationUtil.getMailContent(MailNotificationUtil.METADATA_PERSIST_FAIL, dataMap);
+        String title = MailNotificationUtil.getMailTitle("METADATA PERSIST", "FAIL",
+                context.getConfig().getDeployEnv());
+
+        new MailService(context.getConfig()).sendMail(users, title, content);
+    }
+
+    protected abstract ExecuteResult doWork(ExecutableContext context) throws ExecuteException, PersistentException;
 
     @Override
     public void cleanup() throws ExecuteException {
 
+    }
+
+    public static boolean isMetaDataPersistException(Exception e, final int maxDepth) {
+        if (e instanceof PersistentException) {
+            return true;
+        }
+
+        Throwable t = e.getCause();
+        int depth = 0;
+        while (t != null && depth < maxDepth) {
+            depth++;
+            if (t instanceof PersistentException) {
+                return true;
+            }
+            t = t.getCause();
+        }
+        return false;
     }
 
     @Override
@@ -148,7 +265,7 @@ public abstract class AbstractExecutable implements Executable, Idempotent {
     }
 
     @Override
-    public final String getId() {
+    public String getId() {
         return this.id;
     }
 
@@ -157,8 +274,9 @@ public abstract class AbstractExecutable implements Executable, Idempotent {
     }
 
     @Override
-    public final ExecutableState getStatus() {
-        return executableManager.getOutput(this.getId()).getState();
+    public ExecutableState getStatus() {
+        ExecutableManager manager = getManager();
+        return manager.getOutput(this.getId()).getState();
     }
 
     @Override
@@ -179,7 +297,7 @@ public abstract class AbstractExecutable implements Executable, Idempotent {
     }
 
     public final long getLastModified() {
-        return executableManager.getOutput(getId()).getLastModified();
+        return getOutput().getLastModified();
     }
 
     public final void setSubmitter(String submitter) {
@@ -209,29 +327,50 @@ public abstract class AbstractExecutable implements Executable, Idempotent {
 
     protected final void notifyUserStatusChange(ExecutableContext context, ExecutableState state) {
         try {
-            List<String> users = Lists.newArrayList();
-            users.addAll(getNotifyList());
-            final KylinConfig kylinConfig = KylinConfig.getInstanceFromEnv();
-            final String[] adminDls = kylinConfig.getAdminDls();
-            if (null != adminDls) {
-                for (String adminDl : adminDls) {
-                    users.add(adminDl);
-                }
-            }
+            List<String> users = getAllNofifyUsers(config);
             if (users.isEmpty()) {
-                logger.warn("no need to send email, user list is empty");
+                logger.debug(NO_NEED_TO_SEND_EMAIL_USER_LIST_IS_EMPTY);
                 return;
             }
             final Pair<String, String> email = formatNotifications(context, state);
-            if (email == null) {
-                logger.warn("no need to send email, content is null");
+            doSendMail(config, users, email);
+        } catch (Exception e) {
+            logger.error("error send email", e);
+        }
+    }
+
+    private List<String> getAllNofifyUsers(KylinConfig kylinConfig) {
+        List<String> users = Lists.newArrayList();
+        users.addAll(getNotifyList());
+        final String[] adminDls = kylinConfig.getAdminDls();
+        if (null != adminDls) {
+            for (String adminDl : adminDls) {
+                users.add(adminDl);
+            }
+        }
+        return users;
+    }
+
+    private void doSendMail(KylinConfig kylinConfig, List<String> users, Pair<String, String> email) {
+        if (email == null) {
+            logger.warn("no need to send email, content is null");
+            return;
+        }
+        logger.info("prepare to send email to:{}", users);
+        logger.info("job name:{}", getName());
+        logger.info("submitter:{}", getSubmitter());
+        logger.info("notify list:{}", users);
+        new MailService(kylinConfig).sendMail(users, email.getFirst(), email.getSecond());
+    }
+
+    protected void sendMail(Pair<String, String> email) {
+        try {
+            List<String> users = getAllNofifyUsers(config);
+            if (users.isEmpty()) {
+                logger.debug(NO_NEED_TO_SEND_EMAIL_USER_LIST_IS_EMPTY);
                 return;
             }
-            logger.info("prepare to send email to:" + users);
-            logger.info("job name:" + getName());
-            logger.info("submitter:" + getSubmitter());
-            logger.info("notify list:" + users);
-            new MailService(kylinConfig).sendMail(users, email.getLeft(), email.getRight());
+            doSendMail(config, users, email);
         } catch (Exception e) {
             logger.error("error send email", e);
         }
@@ -241,13 +380,25 @@ public abstract class AbstractExecutable implements Executable, Idempotent {
         return getParam(SUBMITTER);
     }
 
+    public final String getCubeName() {
+        return getParam(CUBE_NAME);
+    }
+
     @Override
     public final Output getOutput() {
-        return executableManager.getOutput(getId());
+        return getManager().getOutput(getId());
     }
 
     protected long getExtraInfoAsLong(String key, long defaultValue) {
-        return getExtraInfoAsLong(executableManager.getOutput(getId()), key, defaultValue);
+        return getExtraInfoAsLong(getOutput(), key, defaultValue);
+    }
+
+    public static String getBuildInstance(Output output) {
+        final String str = output.getExtra().get(BUILD_INSTANCE);
+        if (str != null) {
+            return str;
+        }
+        return "unknown";
     }
 
     public static long getStartTime(Output output) {
@@ -258,15 +409,26 @@ public abstract class AbstractExecutable implements Executable, Idempotent {
         return getExtraInfoAsLong(output, END_TIME, 0L);
     }
 
-    public static long getDuration(long startTime, long endTime) {
+    public static long getInterruptTime(Output output) {
+        return getExtraInfoAsLong(output, INTERRUPT_TIME, 0L);
+    }
+
+    public static long getDuration(long startTime, long endTime, long interruptTime) {
         if (startTime == 0) {
             return 0;
         }
         if (endTime == 0) {
-            return System.currentTimeMillis() - startTime;
+            return System.currentTimeMillis() - startTime - interruptTime;
         } else {
-            return endTime - startTime;
+            return endTime - startTime - interruptTime;
         }
+    }
+
+    public AbstractExecutable getParentExecutable() {
+        return parentExecutable;
+    }
+    public void setParentExecutable(AbstractExecutable parentExecutable) {
+        this.parentExecutable = parentExecutable;
     }
 
     public static long getExtraInfoAsLong(Output output, String key, long defaultValue) {
@@ -278,12 +440,16 @@ public abstract class AbstractExecutable implements Executable, Idempotent {
         }
     }
 
-    protected final void addExtraInfo(String key, String value) {
-        executableManager.addJobInfo(getId(), key, value);
+    public final void addExtraInfo(String key, String value) {
+        getManager().addJobInfo(getId(), key, value);
+    }
+
+    public final String getExtraInfo(String key) {
+        return getExtraInfo().get(key);
     }
 
     protected final Map<String, String> getExtraInfo() {
-        return executableManager.getOutput(getId()).getExtra();
+        return getOutput().getExtra();
     }
 
     public final void setStartTime(long time) {
@@ -294,6 +460,10 @@ public abstract class AbstractExecutable implements Executable, Idempotent {
         addExtraInfo(END_TIME, time + "");
     }
 
+    public final void setInterruptTime(long time) {
+        addExtraInfo(INTERRUPT_TIME, time + "");
+    }
+
     public final long getStartTime() {
         return getExtraInfoAsLong(START_TIME, 0L);
     }
@@ -302,8 +472,39 @@ public abstract class AbstractExecutable implements Executable, Idempotent {
         return getExtraInfoAsLong(END_TIME, 0L);
     }
 
+    public final long getInterruptTime() {
+        return getExtraInfoAsLong(INTERRUPT_TIME, 0L);
+    }
+
     public final long getDuration() {
-        return getDuration(getStartTime(), getEndTime());
+        return getDuration(getStartTime(), getEndTime(), getInterruptTime());
+    }
+
+    public boolean isReady() {
+        final Output output = getManager().getOutput(id);
+        return output.getState() == ExecutableState.READY;
+    }
+
+    /**
+     * The larger the value, the higher priority
+     * */
+    public int getDefaultPriority() {
+        return DEFAULT_PRIORITY;
+    }
+
+    public Integer getPriority() {
+        return priority == null ? getDefaultPriority() : priority;
+    }
+
+    public void setPriority(Integer priority) {
+        this.priority = priority;
+    }
+
+    /**
+     * The different jobs have different default priorities.
+     * */
+    public void setPriorityBasedOnPriorityOffset(Integer priorityOffset) {
+        this.priority = getDefaultPriority() + (priorityOffset == null ? 0 : priorityOffset);
     }
 
     /*
@@ -311,16 +512,53 @@ public abstract class AbstractExecutable implements Executable, Idempotent {
     *
     * */
     protected final boolean isDiscarded() {
-        final ExecutableState status = executableManager.getOutput(getId()).getState();
+        final ExecutableState status = getOutput().getState();
         return status == ExecutableState.DISCARDED;
     }
 
-    protected boolean needRetry() {
-        return this.retry <= KylinConfig.getInstanceFromEnv().getJobRetry();
+    protected final boolean isPaused() {
+        final ExecutableState status = getOutput().getState();
+        return status == ExecutableState.STOPPED;
+    }
+
+    // Retry will happen in below cases:
+    // 1) if property "kylin.job.retry-exception-classes" is not set or is null, all jobs with exceptions will retry according to the retry times.
+    // 2) if property "kylin.job.retry-exception-classes" is set and is not null, only jobs with the specified exceptions will retry according to the retry times.
+    public boolean needRetry(int retry, Throwable t) {
+        if (retry > KylinConfig.getInstanceFromEnv().getJobRetry() || t == null
+                || (this instanceof DefaultChainedExecutable)) {
+            return false;
+        } else {
+            return isRetryableException(t.getClass().getName());
+        }
+    }
+
+    // pauseOnRetry should only works when retry has been triggered
+    public void pauseOnRetry() {
+        int interval = KylinConfig.getInstanceFromEnv().getJobRetryInterval();
+        logger.info("Pause {} milliseconds before retry", interval);
+        try {
+            TimeUnit.MILLISECONDS.sleep(interval);
+        } catch (InterruptedException e) {
+            logger.error("Job retry was interrupted, details: {}", e);
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    private static boolean isRetryableException(String exceptionName) {
+        String[] jobRetryExceptions = KylinConfig.getInstanceFromEnv().getJobRetryExceptions();
+        return ArrayUtils.isEmpty(jobRetryExceptions) || ArrayUtils.contains(jobRetryExceptions, exceptionName);
     }
 
     @Override
     public String toString() {
-        return Objects.toStringHelper(this).add("id", getId()).add("name", getName()).add("state", getStatus()).toString();
+        ExecutableState state = null;
+        try {
+            state = getStatus();
+        } catch (RuntimeException e) {
+            logger.error("failed to get job status:" + getId(), e);
+        }
+        return Objects.toStringHelper(this).add("id", getId()).add("name", getName()).add("state", state)
+                .toString();
     }
 }

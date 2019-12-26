@@ -19,9 +19,11 @@
 package org.apache.kylin.cube.gridtable;
 
 import java.nio.ByteBuffer;
+import java.nio.charset.Charset;
 import java.util.Collections;
 import java.util.Map;
 
+import org.apache.kylin.common.util.Bytes;
 import org.apache.kylin.common.util.ImmutableBitSet;
 import org.apache.kylin.dimension.DictionaryDimEnc;
 import org.apache.kylin.dimension.DictionaryDimEnc.DictionarySerializer;
@@ -32,6 +34,7 @@ import org.apache.kylin.gridtable.IGTCodeSystem;
 import org.apache.kylin.gridtable.IGTComparator;
 import org.apache.kylin.measure.MeasureAggregator;
 import org.apache.kylin.metadata.datatype.DataTypeSerializer;
+import org.apache.kylin.metadata.datatype.DynamicDimSerializer;
 
 /**
  * defines how column values will be encoded to/ decoded from GTRecord 
@@ -66,7 +69,7 @@ public class CubeCodeSystem implements IGTCodeSystem {
     @Override
     public void init(GTInfo info) {
         this.info = info;
-
+        ImmutableBitSet dDims = info.getDynamicDims();
         this.serializers = new DataTypeSerializer[info.getColumnCount()];
         for (int i = 0; i < serializers.length; i++) {
             DimensionEncoding dimEnc = i < dimEncs.length ? dimEncs[i] : null;
@@ -75,8 +78,14 @@ public class CubeCodeSystem implements IGTCodeSystem {
                 // for dimensions
                 serializers[i] = dimEnc.asDataTypeSerializer();
             } else {
-                // for measures
-                serializers[i] = DataTypeSerializer.create(info.getColumnType(i));
+                DataTypeSerializer dSerializer = DataTypeSerializer.create(info.getColumnType(i));
+                if (dDims != null && dDims.get(i)) {
+                    // for dynamic dimensions
+                    dSerializer = new DynamicDimSerializer(dSerializer);
+                } else {
+                    // for measures
+                }
+                serializers[i] = dSerializer;
             }
         }
     }
@@ -118,7 +127,13 @@ public class CubeCodeSystem implements IGTCodeSystem {
             if (dictEnc.getRoundingFlag() != roundingFlag) {
                 serializer = dictEnc.copy(roundingFlag).asDataTypeSerializer();
             }
-            serializer.serialize(value, buf);
+            try {
+                serializer.serialize(value, buf);
+            } catch (IllegalArgumentException ex) {
+                IllegalArgumentException rewordEx = new IllegalArgumentException("Column " + col + " value '" + toStringBinary(value) + "' met dictionary error: " + ex.getMessage());
+                rewordEx.setStackTrace(ex.getStackTrace());
+                throw rewordEx;
+            }
         } else {
             if (value instanceof String) {
                 // for dimensions; measures are converted by MeasureIngestor before reaching this point
@@ -126,6 +141,14 @@ public class CubeCodeSystem implements IGTCodeSystem {
             }
             serializer.serialize(value, buf);
         }
+    }
+
+    private String toStringBinary(Object value) {
+        if (value == null)
+            return "Null";
+        byte[] bytes;
+        bytes = value.toString().getBytes(Charset.forName("UTF-8"));
+        return Bytes.toStringBinary(bytes);
     }
 
     @Override
@@ -145,13 +168,13 @@ public class CubeCodeSystem implements IGTCodeSystem {
 
         // deal with holistic distinct count
         if (dependentMetricsMap != null) {
-            for (Integer child : dependentMetricsMap.keySet()) {
-                if (columns.get(child)) {
-                    Integer parent = dependentMetricsMap.get(child);
+            for (Map.Entry<Integer, Integer> childEntry : dependentMetricsMap.entrySet()) {
+                if (columns.get(childEntry.getKey())) {
+                    Integer parent = childEntry.getValue();
                     if (columns.get(parent) == false)
                         throw new IllegalStateException();
 
-                    int childIdx = columns.trueBitIndexOf(child);
+                    int childIdx = columns.trueBitIndexOf(childEntry.getKey());
                     int parentIdx = columns.trueBitIndexOf(parent);
                     result[childIdx].setDependentAggregator(result[parentIdx]);
                 }
@@ -161,4 +184,8 @@ public class CubeCodeSystem implements IGTCodeSystem {
         return result;
     }
 
+    @Override
+    public DataTypeSerializer<?> getSerializer(int col) {
+        return serializers[col];
+    }
 }

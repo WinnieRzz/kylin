@@ -20,93 +20,34 @@ package org.apache.kylin.rest.controller;
 
 import java.io.IOException;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.TimeZone;
 
-import org.apache.kylin.common.KylinConfig;
-import org.apache.kylin.common.util.ClassUtil;
 import org.apache.kylin.job.JobInstance;
-import org.apache.kylin.job.Scheduler;
-import org.apache.kylin.job.SchedulerFactory;
 import org.apache.kylin.job.constant.JobStatusEnum;
 import org.apache.kylin.job.constant.JobTimeFilterEnum;
-import org.apache.kylin.job.engine.JobEngineConfig;
-import org.apache.kylin.job.exception.SchedulerException;
-import org.apache.kylin.job.execution.AbstractExecutable;
-import org.apache.kylin.job.lock.JobLock;
 import org.apache.kylin.rest.exception.InternalErrorException;
 import org.apache.kylin.rest.request.JobListRequest;
 import org.apache.kylin.rest.service.JobService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.InitializingBean;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Controller;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestMethod;
 import org.springframework.web.bind.annotation.ResponseBody;
 
-/**
- *
- */
 @Controller
 @RequestMapping(value = "jobs")
-public class JobController extends BasicController implements InitializingBean {
+public class JobController extends BasicController {
     private static final Logger logger = LoggerFactory.getLogger(JobController.class);
 
     @Autowired
+    @Qualifier("jobService")
     private JobService jobService;
-
-    private JobLock jobLock;
-
-    /*
-     * (non-Javadoc)
-     * 
-     * @see
-     * org.springframework.beans.factory.InitializingBean#afterPropertiesSet()
-     */
-    @SuppressWarnings("unchecked")
-    @Override
-    public void afterPropertiesSet() throws Exception {
-
-        String timeZone = jobService.getConfig().getTimeZone();
-        TimeZone tzone = TimeZone.getTimeZone(timeZone);
-        TimeZone.setDefault(tzone);
-
-        final KylinConfig kylinConfig = KylinConfig.getInstanceFromEnv();
-        final Scheduler<AbstractExecutable> scheduler = (Scheduler<AbstractExecutable>) SchedulerFactory.scheduler(kylinConfig.getSchedulerType());
-
-        jobLock = (JobLock) ClassUtil.newInstance(kylinConfig.getJobControllerLock());
-
-        new Thread(new Runnable() {
-            @Override
-            public void run() {
-                try {
-                    scheduler.init(new JobEngineConfig(kylinConfig), jobLock);
-                    if (!scheduler.hasStarted()) {
-                        logger.info("Job engine doesn't start in this node.");
-                    }
-                } catch (Exception e) {
-                    throw new RuntimeException(e);
-                }
-            }
-        }).start();
-
-        Runtime.getRuntime().addShutdownHook(new Thread(new Runnable() {
-            @Override
-            public void run() {
-                try {
-                    scheduler.shutdown();
-                } catch (SchedulerException e) {
-                    logger.error("error occurred to shutdown scheduler", e);
-                }
-            }
-        }));
-    }
 
     /**
      * get all cube jobs
@@ -114,11 +55,11 @@ public class JobController extends BasicController implements InitializingBean {
      * @return
      * @throws IOException
      */
-    @RequestMapping(value = "", method = { RequestMethod.GET })
+    @RequestMapping(value = "", method = { RequestMethod.GET }, produces = { "application/json" })
     @ResponseBody
     public List<JobInstance> list(JobListRequest jobRequest) {
 
-        List<JobInstance> jobInstanceList = Collections.emptyList();
+        List<JobInstance> jobInstanceList;
         List<JobStatusEnum> statusList = new ArrayList<JobStatusEnum>();
 
         if (null != jobRequest.getStatus()) {
@@ -127,10 +68,23 @@ public class JobController extends BasicController implements InitializingBean {
             }
         }
 
-        JobTimeFilterEnum timeFilter = JobTimeFilterEnum.getByCode(jobRequest.getTimeFilter());
+        JobTimeFilterEnum timeFilter = JobTimeFilterEnum.LAST_ONE_WEEK;
+        if (null != jobRequest.getTimeFilter()) {
+            timeFilter = JobTimeFilterEnum.getByCode(jobRequest.getTimeFilter());
+        }
+
+        JobService.JobSearchMode jobSearchMode = JobService.JobSearchMode.CUBING_ONLY;
+        if (null != jobRequest.getJobSearchMode()) {
+            try {
+                jobSearchMode = JobService.JobSearchMode.valueOf(jobRequest.getJobSearchMode());
+            } catch (IllegalArgumentException e) {
+                logger.warn("Invalid value for JobSearchMode: '" + jobRequest.getJobSearchMode() + "', skip it.");
+            }
+        }
 
         try {
-            jobInstanceList = jobService.listAllJobs(jobRequest.getCubeName(), jobRequest.getProjectName(), statusList, jobRequest.getLimit(), jobRequest.getOffset(), timeFilter);
+            jobInstanceList = jobService.searchJobsV2(jobRequest.getCubeName(), jobRequest.getProjectName(), statusList,
+                    jobRequest.getLimit(), jobRequest.getOffset(), timeFilter, jobSearchMode);
         } catch (Exception e) {
             logger.error(e.getLocalizedMessage(), e);
             throw new InternalErrorException(e);
@@ -139,12 +93,53 @@ public class JobController extends BasicController implements InitializingBean {
     }
 
     /**
+     * get job status overview
+     *
+     * @return
+     * @throws IOException
+     */
+    @RequestMapping(value = "/overview", method = { RequestMethod.GET }, produces = { "application/json" })
+    @ResponseBody
+    public Map<JobStatusEnum, Integer> jobOverview(JobListRequest jobRequest) {
+        Map<JobStatusEnum, Integer> jobOverview = new HashMap<>();
+        List<JobStatusEnum> statusList = new ArrayList<JobStatusEnum>();
+        if (null != jobRequest.getStatus()) {
+            for (int status : jobRequest.getStatus()) {
+                statusList.add(JobStatusEnum.getByCode(status));
+            }
+        }
+
+        JobTimeFilterEnum timeFilter = JobTimeFilterEnum.LAST_ONE_WEEK;
+        if (null != jobRequest.getTimeFilter()) {
+            timeFilter = JobTimeFilterEnum.getByCode(jobRequest.getTimeFilter());
+        }
+
+        JobService.JobSearchMode jobSearchMode = JobService.JobSearchMode.CUBING_ONLY;
+        if (null != jobRequest.getJobSearchMode()) {
+            try {
+                jobSearchMode = JobService.JobSearchMode.valueOf(jobRequest.getJobSearchMode());
+            } catch (IllegalArgumentException e) {
+                logger.warn("Invalid value for JobSearchMode: '" + jobRequest.getJobSearchMode() + "', skip it.");
+            }
+        }
+
+        try {
+            jobOverview = jobService.searchJobsOverview(jobRequest.getCubeName(), jobRequest.getProjectName(), statusList,
+                    timeFilter, jobSearchMode);
+        } catch (Exception e) {
+            logger.error(e.getLocalizedMessage(), e);
+            throw new InternalErrorException(e);
+        }
+        return jobOverview;
+    }
+
+    /**
      * Get a cube job
      * 
      * @return
      * @throws IOException
      */
-    @RequestMapping(value = "/{jobId}", method = { RequestMethod.GET })
+    @RequestMapping(value = "/{jobId}", method = { RequestMethod.GET }, produces = { "application/json" })
     @ResponseBody
     public JobInstance get(@PathVariable String jobId) {
         JobInstance jobInstance = null;
@@ -164,7 +159,8 @@ public class JobController extends BasicController implements InitializingBean {
      * @return
      * @throws IOException
      */
-    @RequestMapping(value = "/{jobId}/steps/{stepId}/output", method = { RequestMethod.GET })
+    @RequestMapping(value = "/{jobId}/steps/{stepId}/output", method = { RequestMethod.GET }, produces = {
+            "application/json" })
     @ResponseBody
     public Map<String, String> getStepOutput(@PathVariable String jobId, @PathVariable String stepId) {
         Map<String, String> result = new HashMap<String, String>();
@@ -180,7 +176,7 @@ public class JobController extends BasicController implements InitializingBean {
      * @return
      * @throws IOException
      */
-    @RequestMapping(value = "/{jobId}/resume", method = { RequestMethod.PUT })
+    @RequestMapping(value = "/{jobId}/resume", method = { RequestMethod.PUT }, produces = { "application/json" })
     @ResponseBody
     public JobInstance resume(@PathVariable String jobId) {
         try {
@@ -194,23 +190,103 @@ public class JobController extends BasicController implements InitializingBean {
     }
 
     /**
-     * Cancel a job
+     * resubmit streaming segment
+     *
+     * @throws IOException
+     */
+    @RequestMapping(value = "/{jobId}/resubmit", method = { RequestMethod.PUT }, produces = {
+            "application/json" })
+    @ResponseBody
+    public void resubmitJob(@PathVariable String jobId) throws IOException {
+        try {
+            final JobInstance jobInstance = jobService.getJobInstance(jobId);
+            jobService.resubmitJob(jobInstance);
+        } catch (Exception e) {
+            logger.error(e.getLocalizedMessage(), e);
+            throw e;
+        }
+    }
+
+    /**
+     * Cancel/discard a job
      * 
      * @return
      * @throws IOException
      */
-    @RequestMapping(value = "/{jobId}/cancel", method = { RequestMethod.PUT })
+    @RequestMapping(value = "/{jobId}/cancel", method = { RequestMethod.PUT }, produces = { "application/json" })
     @ResponseBody
     public JobInstance cancel(@PathVariable String jobId) {
 
         try {
             final JobInstance jobInstance = jobService.getJobInstance(jobId);
-            return jobService.cancelJob(jobInstance);
+            jobService.cancelJob(jobInstance);
+            return jobService.getJobInstance(jobId);
+        } catch (Exception e) {
+            logger.error(e.getLocalizedMessage(), e);
+            throw new InternalErrorException(e);
+        }
+    }
+
+    /**
+     * Pause a job
+     *
+     * @return
+     * @throws IOException
+     */
+    @RequestMapping(value = "/{jobId}/pause", method = { RequestMethod.PUT }, produces = { "application/json" })
+    @ResponseBody
+    public JobInstance pause(@PathVariable String jobId) {
+
+        try {
+            final JobInstance jobInstance = jobService.getJobInstance(jobId);
+            jobService.pauseJob(jobInstance);
+            return jobService.getJobInstance(jobId);
         } catch (Exception e) {
             logger.error(e.getLocalizedMessage(), e);
             throw new InternalErrorException(e);
         }
 
+    }
+
+    /**
+     * Rollback a job to the given step
+     *
+     * @return
+     * @throws IOException
+     */
+    @RequestMapping(value = "/{jobId}/steps/{stepId}/rollback", method = { RequestMethod.PUT }, produces = {
+            "application/json" })
+    @ResponseBody
+    public JobInstance rollback(@PathVariable String jobId, @PathVariable String stepId) {
+        try {
+            final JobInstance jobInstance = jobService.getJobInstance(jobId);
+            jobService.rollbackJob(jobInstance, stepId);
+            return jobService.getJobInstance(jobId);
+        } catch (Exception e) {
+            logger.error(e.getLocalizedMessage(), e);
+            throw new InternalErrorException(e);
+        }
+    }
+
+    /**
+     * Drop a cube job
+     *
+     * @return
+     * @throws IOException
+     */
+    @RequestMapping(value = "/{jobId}/drop", method = { RequestMethod.DELETE }, produces = { "application/json" })
+    @ResponseBody
+    public JobInstance dropJob(@PathVariable String jobId) {
+        JobInstance jobInstance = null;
+        try {
+            jobInstance = jobService.getJobInstance(jobId);
+            jobService.dropJob(jobInstance);
+        } catch (Exception e) {
+            logger.error(e.getLocalizedMessage(), e);
+            throw new InternalErrorException(e);
+        }
+
+        return jobInstance;
     }
 
     public void setJobService(JobService jobService) {

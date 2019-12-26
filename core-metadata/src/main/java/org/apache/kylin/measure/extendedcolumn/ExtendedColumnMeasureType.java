@@ -18,6 +18,7 @@
 
 package org.apache.kylin.measure.extendedcolumn;
 
+import java.nio.charset.StandardCharsets;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
@@ -47,25 +48,25 @@ public class ExtendedColumnMeasureType extends MeasureType<ByteArray> {
 
     private static final Logger logger = LoggerFactory.getLogger(ExtendedColumnMeasureType.class);
 
-    public static final String FUNC_RAW = "EXTENDED_COLUMN";
-    public static final String DATATYPE_RAW = "extendedcolumn";
+    public static final String FUNC_EXTENDED_COLUMN = "EXTENDED_COLUMN";
+    public static final String DATATYPE_EXTENDED_COLUMN = "extendedcolumn";
     private final DataType dataType;
 
     public static class Factory extends MeasureTypeFactory<ByteArray> {
 
         @Override
         public MeasureType<ByteArray> createMeasureType(String funcName, DataType dataType) {
-            return new ExtendedColumnMeasureType(funcName, dataType);
+            return new ExtendedColumnMeasureType(dataType);
         }
 
         @Override
         public String getAggrFunctionName() {
-            return FUNC_RAW;
+            return FUNC_EXTENDED_COLUMN;
         }
 
         @Override
         public String getAggrDataTypeName() {
-            return DATATYPE_RAW;
+            return DATATYPE_EXTENDED_COLUMN;
         }
 
         @Override
@@ -74,7 +75,7 @@ public class ExtendedColumnMeasureType extends MeasureType<ByteArray> {
         }
     }
 
-    public ExtendedColumnMeasureType(String funcName, DataType dataType) {
+    public ExtendedColumnMeasureType(DataType dataType) {
         this.dataType = dataType;
     }
 
@@ -93,23 +94,29 @@ public class ExtendedColumnMeasureType extends MeasureType<ByteArray> {
     }
 
     @Override
-    public void adjustSqlDigest(MeasureDesc measureDesc, SQLDigest sqlDigest) {
-        FunctionDesc extendColumnFunc = measureDesc.getFunction();
-        List<TblColRef> hosts = getExtendedColumnHosts(extendColumnFunc);
-        TblColRef extended = getExtendedColumn(extendColumnFunc);
+    public void adjustSqlDigest(List<MeasureDesc> measureDescs, SQLDigest sqlDigest) {
+        for (MeasureDesc measureDesc : measureDescs) {
+            if (!sqlDigest.involvedMeasure.contains(measureDesc)) {
+                continue;
+            }
+            FunctionDesc extendColumnFunc = measureDesc.getFunction();
+            List<TblColRef> hosts = getExtendedColumnHosts(extendColumnFunc);
+            TblColRef extended = getExtendedColumn(extendColumnFunc);
 
-        if (!sqlDigest.groupbyColumns.contains(extended)) {
-            return;
+            if (!sqlDigest.groupbyColumns.contains(extended)) {
+                continue;
+            }
+
+            sqlDigest.aggregations.add(extendColumnFunc);
+            sqlDigest.groupbyColumns.remove(extended);
+            sqlDigest.groupbyColumns.addAll(hosts);
+            sqlDigest.metricColumns.add(extended);
         }
-
-        sqlDigest.aggregations.add(extendColumnFunc);
-        sqlDigest.groupbyColumns.remove(extended);
-        sqlDigest.groupbyColumns.addAll(hosts);
-        sqlDigest.metricColumns.add(extended);
     }
 
     @Override
-    public CapabilityResult.CapabilityInfluence influenceCapabilityCheck(Collection<TblColRef> unmatchedDimensions, Collection<FunctionDesc> unmatchedAggregations, SQLDigest digest, MeasureDesc measureDesc) {
+    public CapabilityResult.CapabilityInfluence influenceCapabilityCheck(Collection<TblColRef> unmatchedDimensions,
+            Collection<FunctionDesc> unmatchedAggregations, SQLDigest digest, final MeasureDesc measureDesc) {
         TblColRef extendedCol = getExtendedColumn(measureDesc.getFunction());
 
         if (!unmatchedDimensions.contains(extendedCol)) {
@@ -127,6 +134,11 @@ public class ExtendedColumnMeasureType extends MeasureType<ByteArray> {
             public double suggestCostMultiplier() {
                 return 0.9;
             }
+
+            @Override
+            public MeasureDesc getInvolvedMeasure() {
+                return measureDesc;
+            }
         };
     }
 
@@ -134,9 +146,11 @@ public class ExtendedColumnMeasureType extends MeasureType<ByteArray> {
         return true;
     }
 
-    public IAdvMeasureFiller getAdvancedTupleFiller(FunctionDesc function, TupleInfo returnTupleInfo, Map<TblColRef, Dictionary<String>> dictionaryMap) {
+    public IAdvMeasureFiller getAdvancedTupleFiller(FunctionDesc function, TupleInfo returnTupleInfo,
+            Map<TblColRef, Dictionary<String>> dictionaryMap) {
         final TblColRef extended = getExtendedColumn(function);
-        final int extendedColumnInTupleIdx = returnTupleInfo.hasColumn(extended) ? returnTupleInfo.getColumnIndex(extended) : -1;
+        final int extendedColumnInTupleIdx = returnTupleInfo.hasColumn(extended)
+                ? returnTupleInfo.getColumnIndex(extended) : -1;
 
         if (extendedColumnInTupleIdx == -1) {
             throw new RuntimeException("Extended column is not required in returnTupleInfo");
@@ -151,7 +165,7 @@ public class ExtendedColumnMeasureType extends MeasureType<ByteArray> {
                     value = null;
                     return;
                 }
-                
+
                 ByteArray byteArray = (ByteArray) measureValue;
                 //the array in ByteArray is guaranteed to be completed owned by the ByteArray
                 value = Bytes.toString(byteArray.array());
@@ -206,7 +220,8 @@ public class ExtendedColumnMeasureType extends MeasureType<ByteArray> {
             }
 
             @Override
-            public ByteArray valueOf(String[] values, MeasureDesc measureDesc, Map<TblColRef, Dictionary<String>> dictionaryMap) {
+            public ByteArray valueOf(String[] values, MeasureDesc measureDesc,
+                    Map<TblColRef, Dictionary<String>> dictionaryMap) {
                 if (values.length <= 1)
                     throw new IllegalArgumentException();
 
@@ -219,12 +234,19 @@ public class ExtendedColumnMeasureType extends MeasureType<ByteArray> {
                 if (bytes.length <= dataType.getPrecision()) {
                     return new ByteArray(bytes);
                 } else {
-                    return new ByteArray(truncateWhenUTF8(literal, dataType.getPrecision()).getBytes());
+                    return new ByteArray(
+                            truncateWhenUTF8(literal, dataType.getPrecision()).getBytes(StandardCharsets.UTF_8));
                 }
+            }
+
+            @Override
+            public void reset() {
+
             }
         };
     }
 
+    @SuppressWarnings("serial")
     @Override
     public MeasureAggregator<ByteArray> newAggregator() {
         return new MeasureAggregator<ByteArray>() {
@@ -251,6 +273,21 @@ public class ExtendedColumnMeasureType extends MeasureType<ByteArray> {
             }
 
             @Override
+            public ByteArray aggregate(ByteArray value1, ByteArray value2) {
+                if (value1 == null) {
+                    return value2;
+                } else if (value2 == null) {
+                    return value1;
+                } else if (!value1.equals(value2)) {
+                    if (!warned) {
+                        logger.warn("Extended column must be unique given same host column");
+                        warned = true;
+                    }
+                }
+                return value1;
+            }
+
+            @Override
             public ByteArray getState() {
                 return byteArray;
             }
@@ -265,10 +302,5 @@ public class ExtendedColumnMeasureType extends MeasureType<ByteArray> {
     @Override
     public boolean needRewrite() {
         return false;
-    }
-
-    @Override
-    public Class<?> getRewriteCalciteAggrFunctionClass() {
-        return null;
     }
 }

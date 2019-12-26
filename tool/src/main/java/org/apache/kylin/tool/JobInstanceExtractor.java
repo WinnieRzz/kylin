@@ -26,6 +26,8 @@ import org.apache.commons.cli.Option;
 import org.apache.commons.cli.OptionBuilder;
 import org.apache.kylin.common.KylinConfig;
 import org.apache.kylin.common.util.OptionsHelper;
+import org.apache.kylin.cube.CubeInstance;
+import org.apache.kylin.cube.CubeManager;
 import org.apache.kylin.cube.model.CubeBuildTypeEnum;
 import org.apache.kylin.engine.mr.CubingJob;
 import org.apache.kylin.engine.mr.common.HadoopShellExecutable;
@@ -36,9 +38,9 @@ import org.apache.kylin.job.common.ShellExecutable;
 import org.apache.kylin.job.constant.JobStatusEnum;
 import org.apache.kylin.job.constant.JobStepStatusEnum;
 import org.apache.kylin.job.execution.AbstractExecutable;
+import org.apache.kylin.job.execution.ExecutableManager;
 import org.apache.kylin.job.execution.ExecutableState;
 import org.apache.kylin.job.execution.Output;
-import org.apache.kylin.job.manager.ExecutableManager;
 import org.apache.kylin.metadata.project.ProjectInstance;
 import org.apache.kylin.metadata.project.ProjectManager;
 import org.apache.kylin.metadata.realization.RealizationType;
@@ -81,11 +83,11 @@ public class JobInstanceExtractor extends AbstractInfoExtractor {
     protected void executeExtract(OptionsHelper optionsHelper, File exportDir) throws Exception {
         String cube = optionsHelper.hasOption(OPTION_CUBE) ? optionsHelper.getOptionValue(OPTION_CUBE) : null;
         String project = optionsHelper.hasOption(OPTION_PROJECT) ? optionsHelper.getOptionValue(OPTION_PROJECT) : null;
-        int period = optionsHelper.hasOption(OPTION_PERIOD) ? Integer.valueOf(optionsHelper.getOptionValue(OPTION_PERIOD)) : DEFAULT_PERIOD;
+        int period = optionsHelper.hasOption(OPTION_PERIOD) ? Integer.parseInt(optionsHelper.getOptionValue(OPTION_PERIOD)) : DEFAULT_PERIOD;
 
         long endTime = System.currentTimeMillis();
         long startTime = endTime - period * 24 * 3600 * 1000; // time in Millis
-        List<JobInstance> jobInstances = listJobInstances(cube, project, startTime, endTime);
+        List<JobInstance> jobInstances = listJobInstances(project, cube, startTime, endTime);
         logger.info("There are {} jobInstances to extract.", jobInstances.size());
 
         ObjectMapper mapper = new ObjectMapper();
@@ -122,18 +124,34 @@ public class JobInstanceExtractor extends AbstractInfoExtractor {
     }
 
     private JobInstance parseToJobInstance(CubingJob cubeJob, Map<String, Output> outputs) {
+        CubeInstance cube = CubeManager.getInstance(KylinConfig.getInstanceFromEnv())
+                .getCube(CubingExecutableUtil.getCubeName(cubeJob.getParams()));
+
         Output output = outputs.get(cubeJob.getId());
         final JobInstance result = new JobInstance();
         result.setName(cubeJob.getName());
-        result.setRelatedCube(CubingExecutableUtil.getCubeName(cubeJob.getParams()));
+        result.setProjectName(cubeJob.getProjectName());
+        if (cube != null) {
+            result.setRelatedCube(cube.getName());
+            result.setDisplayCubeName(cube.getDisplayName());
+        } else {
+            String cubeName = CubingExecutableUtil.getCubeName(cubeJob.getParams());
+            result.setRelatedCube(cubeName);
+            result.setDisplayCubeName(cubeName);
+        }
         result.setRelatedSegment(CubingExecutableUtil.getSegmentId(cubeJob.getParams()));
+        result.setRelatedSegmentName(CubingExecutableUtil.getSegmentName(cubeJob.getParams()));
         result.setLastModified(output.getLastModified());
         result.setSubmitter(cubeJob.getSubmitter());
         result.setUuid(cubeJob.getId());
         result.setType(CubeBuildTypeEnum.BUILD);
         result.setStatus(parseToJobStatus(output.getState()));
         result.setMrWaiting(AbstractExecutable.getExtraInfoAsLong(output, CubingJob.MAP_REDUCE_WAIT_TIME, 0L) / 1000);
-        result.setDuration(AbstractExecutable.getDuration(AbstractExecutable.getStartTime(output), AbstractExecutable.getEndTime(output)) / 1000);
+        result.setBuildInstance(AbstractExecutable.getBuildInstance(output));
+        result.setExecStartTime(AbstractExecutable.getStartTime(output));
+        result.setExecEndTime(AbstractExecutable.getEndTime(output));
+        result.setExecInterruptTime(AbstractExecutable.getInterruptTime(output));
+        result.setDuration(AbstractExecutable.getDuration(AbstractExecutable.getStartTime(output), AbstractExecutable.getEndTime(output), AbstractExecutable.getInterruptTime(output)) / 1000);
         for (int i = 0; i < cubeJob.getTasks().size(); ++i) {
             AbstractExecutable task = cubeJob.getTasks().get(i);
             result.addStep(parseToJobStep(task, i, outputs.get(task.getId())));

@@ -18,6 +18,7 @@
 
 package org.apache.kylin.dict.lookup;
 
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
@@ -27,8 +28,10 @@ import org.apache.kylin.common.KylinConfig;
 import org.apache.kylin.common.util.DateFormat;
 import org.apache.kylin.common.util.LocalFileMetadataTestCase;
 import org.apache.kylin.common.util.Pair;
-import org.apache.kylin.metadata.MetadataManager;
+import org.apache.kylin.dict.TrieDictionaryForest;
+import org.apache.kylin.metadata.TableMetadataManager;
 import org.apache.kylin.metadata.model.TableDesc;
+import org.apache.kylin.source.IReadableTable;
 import org.junit.After;
 import org.junit.Assert;
 import org.junit.Before;
@@ -107,19 +110,67 @@ public class LookupTableTest extends LocalFileMetadataTestCase {
         }
     }
 
+    @Test
+    public void testGetClassName(){
+        String name = TrieDictionaryForest.class.getName();
+        System.out.println(name);
+
+    }
+
+    @Test
+    public void testSnapshotOverVolume() throws IOException {
+        KylinConfig cubeConfig = KylinConfig.createKylinConfig(getTestConfig());
+        cubeConfig.setProperty("kylin.snapshot.max-mb", "0");
+        String tableName = "DEFAULT.TEST_KYLIN_FACT";
+        TableDesc tableDesc = TableMetadataManager.getInstance(getTestConfig()).getTableDesc(tableName, "default");
+        IReadableTable mockTable = new IReadableTable() {
+            @Override
+            public TableReader getReader() throws IOException {
+                return new TableReader() {
+                    @Override
+                    public boolean next() throws IOException {
+                        return false;
+                    }
+                    @Override
+                    public String[] getRow() {
+                        return new String[0];
+                    }
+                    @Override
+                    public void close() throws IOException {
+                    }
+                };
+            }
+            @Override
+            public TableSignature getSignature() throws IOException {
+                return new IReadableTable.TableSignature("", 2 * 1024 * 1024,
+                        System.currentTimeMillis());
+            }
+            @Override
+            public boolean exists() throws IOException {
+                return false;
+            }
+        };
+        SnapshotManager snapshotManager = getSnapshotManager();
+        try {
+            snapshotManager.buildSnapshot(mockTable, tableDesc, cubeConfig).getResourcePath();
+        } catch (IllegalStateException ex) {
+            Assert.assertTrue(ex.getLocalizedMessage().startsWith("Table snapshot should be no greater than 0 MB"));
+        }
+    }
+
     private String millis(String dateStr) {
         return String.valueOf(DateFormat.stringToMillis(dateStr));
     }
 
     public LookupTable<String> initLookupTable() throws Exception {
 
-        MetadataManager metaMgr = MetadataManager.getInstance(config);
+        TableMetadataManager metaMgr = TableMetadataManager.getInstance(config);
 
         String tableName = "EDW.TEST_CAL_DT";
         String[] pkCols = new String[] { "CAL_DT" };
         String snapshotResPath = "/table_snapshot/TEST_CAL_DT.csv/4af48c94-86de-4e22-a4fd-c49b06cbaa4f.snapshot";
         SnapshotTable snapshot = getSnapshotManager().getSnapshotTable(snapshotResPath);
-        TableDesc tableDesc = metaMgr.getTableDesc(tableName);
+        TableDesc tableDesc = metaMgr.getTableDesc(tableName, "default");
         LookupTable<String> lt = new LookupStringTable(tableDesc, pkCols, snapshot);
 
         System.out.println(lt);

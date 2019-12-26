@@ -19,8 +19,11 @@
 package org.apache.kylin.rest.security;
 
 import java.util.HashSet;
+import java.util.Locale;
 import java.util.Set;
 
+import org.apache.commons.lang.ArrayUtils;
+import org.apache.commons.lang.StringUtils;
 import org.apache.kylin.rest.constant.Constant;
 import org.springframework.ldap.core.ContextSource;
 import org.springframework.security.core.GrantedAuthority;
@@ -31,9 +34,10 @@ import org.springframework.security.ldap.userdetails.DefaultLdapAuthoritiesPopul
  * @author xduo
  * 
  */
+@Deprecated
+//this class should be replaced by LDAPAuthoritiesPopulator
 public class AuthoritiesPopulator extends DefaultLdapAuthoritiesPopulator {
 
-    String adminRole;
     SimpleGrantedAuthority adminRoleAsAuthority;
 
     SimpleGrantedAuthority adminAuthority = new SimpleGrantedAuthority(Constant.ROLE_ADMIN);
@@ -46,30 +50,37 @@ public class AuthoritiesPopulator extends DefaultLdapAuthoritiesPopulator {
      * @param contextSource
      * @param groupSearchBase
      */
-    public AuthoritiesPopulator(ContextSource contextSource, String groupSearchBase, String adminRole, String defaultRole) {
+    public AuthoritiesPopulator(ContextSource contextSource, String groupSearchBase, String adminRole,
+            String defaultRole) {
         super(contextSource, groupSearchBase);
-        this.adminRole = adminRole;
-        this.adminRoleAsAuthority = new SimpleGrantedAuthority(adminRole);
+        this.adminRoleAsAuthority = new SimpleGrantedAuthority(adminRole.toUpperCase(Locale.ROOT)); // spring will
+        // convert group names to uppercase by default
 
-        if (defaultRole.contains(Constant.ROLE_MODELER))
+        String[] defaultRoles = StringUtils.split(defaultRole, ",");
+        if (ArrayUtils.contains(defaultRoles, Constant.ROLE_MODELER)) {
             this.defaultAuthorities.add(modelerAuthority);
-        if (defaultRole.contains(Constant.ROLE_ANALYST))
+            this.defaultAuthorities.add(analystAuthority);
+        }
+
+        if (ArrayUtils.contains(defaultRoles, Constant.ROLE_ANALYST))
             this.defaultAuthorities.add(analystAuthority);
     }
 
     @Override
     public Set<GrantedAuthority> getGroupMembershipRoles(String userDn, String username) {
+        setGroupSearchFilter("(|(member={0})(memberUid={1}))");
         Set<GrantedAuthority> authorities = super.getGroupMembershipRoles(userDn, username);
 
+        Set<GrantedAuthority> userAuthorities = new HashSet<GrantedAuthority>();
+        userAuthorities.addAll(defaultAuthorities);
+
         if (authorities.contains(adminRoleAsAuthority)) {
-            authorities.add(adminAuthority);
-            authorities.add(modelerAuthority);
-            authorities.add(analystAuthority);
+            userAuthorities.add(adminAuthority);
+            userAuthorities.add(modelerAuthority);
+            userAuthorities.add(analystAuthority);
         }
 
-        authorities.addAll(defaultAuthorities);
-
-        return authorities;
+        return userAuthorities;
     }
 
 }

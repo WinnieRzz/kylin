@@ -18,13 +18,19 @@
 
 package org.apache.kylin.rest.security;
 
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.PrintWriter;
+import java.io.StringWriter;
+import java.lang.reflect.Method;
+import java.nio.charset.Charset;
+import java.util.Locale;
 import java.util.Properties;
 
-import javax.crypto.Cipher;
-import javax.crypto.spec.SecretKeySpec;
-
-import org.apache.commons.codec.binary.Base64;
+import org.apache.commons.io.IOUtils;
 import org.apache.kylin.common.KylinConfig;
+import org.apache.kylin.common.KylinConfigBase;
+import org.apache.kylin.common.util.EncryptUtil;
 import org.springframework.beans.factory.config.PropertyPlaceholderConfigurer;
 import org.springframework.core.io.InputStreamResource;
 import org.springframework.core.io.Resource;
@@ -36,48 +42,47 @@ import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
  */
 public class PasswordPlaceholderConfigurer extends PropertyPlaceholderConfigurer {
 
-    private static byte[] key = { 0x74, 0x68, 0x69, 0x73, 0x49, 0x73, 0x41, 0x53, 0x65, 0x63, 0x72, 0x65, 0x74, 0x4b, 0x65, 0x79 };
-
-    public PasswordPlaceholderConfigurer() {
+    /**
+     * The PasswordPlaceholderConfigurer will read Kylin properties as the Spring resource
+     */
+    public PasswordPlaceholderConfigurer() throws IOException {
         Resource[] resources = new Resource[1];
-        resources[0] = new InputStreamResource(KylinConfig.getKylinPropertiesAsInputStream());
+        //Properties prop = KylinConfig.getKylinProperties();
+        Properties prop = getAllKylinProperties();
+        StringWriter writer = new StringWriter();
+        prop.store(new PrintWriter(writer), "kylin properties");
+        String propString = writer.getBuffer().toString();
+        IOUtils.closeQuietly(writer);
+        InputStream is = IOUtils.toInputStream(propString, Charset.defaultCharset());
+        resources[0] = new InputStreamResource(is);
         this.setLocations(resources);
     }
 
-    public static String encrypt(String strToEncrypt) {
+    public Properties getAllKylinProperties() {
+        // hack to get all config properties
+        Properties allProps = null;
         try {
-            Cipher cipher = Cipher.getInstance("AES/ECB/PKCS5Padding");
-            final SecretKeySpec secretKey = new SecretKeySpec(key, "AES");
-            cipher.init(Cipher.ENCRYPT_MODE, secretKey);
-            final String encryptedString = Base64.encodeBase64String(cipher.doFinal(strToEncrypt.getBytes()));
-            return encryptedString;
+            KylinConfig kylinConfig = KylinConfig.getInstanceFromEnv();
+            Method getAllMethod = KylinConfigBase.class.getDeclaredMethod("getAllProperties");
+            getAllMethod.setAccessible(true);
+            allProps = (Properties) getAllMethod.invoke(kylinConfig);
         } catch (Exception e) {
-            throw new RuntimeException(e.getMessage(), e);
+            throw new RuntimeException(e);
         }
-    }
-
-    public static String decrypt(String strToDecrypt) {
-        try {
-            Cipher cipher = Cipher.getInstance("AES/ECB/PKCS5PADDING");
-            final SecretKeySpec secretKey = new SecretKeySpec(key, "AES");
-            cipher.init(Cipher.DECRYPT_MODE, secretKey);
-            final String decryptedString = new String(cipher.doFinal(Base64.decodeBase64(strToDecrypt)));
-            return decryptedString;
-        } catch (Exception e) {
-            throw new RuntimeException(e.getMessage(), e);
-        }
+        return allProps;
     }
 
     protected String resolvePlaceholder(String placeholder, Properties props) {
-        if (placeholder.toLowerCase().contains("password")) {
-            return decrypt(props.getProperty(placeholder));
+        if (placeholder.toLowerCase(Locale.ROOT).contains("password")) {
+            return EncryptUtil.decrypt(props.getProperty(placeholder));
         } else {
             return props.getProperty(placeholder);
         }
     }
 
     private static void printUsage() {
-        System.out.println("Usage: java org.apache.kylin.rest.security.PasswordPlaceholderConfigurer <EncryptMethod> <your_password>");
+        System.out.println(
+                "Usage: ${KYLIN_HOME}/bin/kylin.sh org.apache.kylin.rest.security.PasswordPlaceholderConfigurer <EncryptMethod> <your_password>");
         System.out.println("EncryptMethod: AES or BCrypt");
     }
 
@@ -92,7 +97,7 @@ public class PasswordPlaceholderConfigurer extends PropertyPlaceholderConfigurer
         if ("AES".equalsIgnoreCase(encryptMethod)) {
             // for encrypt password like LDAP password
             System.out.println(encryptMethod + " encrypted password is: ");
-            System.out.println(encrypt(passwordTxt));
+            System.out.println(EncryptUtil.encrypt(passwordTxt));
         } else if ("BCrypt".equalsIgnoreCase(encryptMethod)) {
             // for encrypt the predefined user password, like ADMIN, MODELER.
             BCryptPasswordEncoder bCryptPasswordEncoder = new BCryptPasswordEncoder();

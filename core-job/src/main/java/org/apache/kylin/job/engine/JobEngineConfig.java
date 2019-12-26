@@ -21,6 +21,7 @@ package org.apache.kylin.job.engine;
 import java.io.File;
 import java.io.IOException;
 
+import java.util.Locale;
 import org.apache.commons.lang.StringUtils;
 import org.apache.kylin.common.KylinConfig;
 import org.apache.kylin.common.util.OptionsHelper;
@@ -33,9 +34,9 @@ import org.slf4j.LoggerFactory;
 public class JobEngineConfig {
     private static final Logger logger = LoggerFactory.getLogger(JobEngineConfig.class);
     public static final String HADOOP_JOB_CONF_FILENAME = "kylin_job_conf";
-    public static final String HIVE_CONF_FILENAME = "kylin_hive_conf";
-    public static final String DEFAUL_JOB_CONF_SUFFIX = "";
+    public static final String DEFAULT_JOB_CONF_SUFFIX = "";
     public static final String IN_MEM_JOB_CONF_SUFFIX = "inmem";
+    public static final String CUBE_MERGE_JOB_CONF_SUFFIX = "cube_merge";
 
     private static File getJobConfig(String fileName) {
         String path = System.getProperty(KylinConfig.KYLIN_CONF);
@@ -53,7 +54,7 @@ public class JobEngineConfig {
     private String getHadoopJobConfFilePath(String suffix, boolean appendSuffix) throws IOException {
         String hadoopJobConfFile;
         if (suffix != null && appendSuffix) {
-            hadoopJobConfFile = (HADOOP_JOB_CONF_FILENAME + "_" + suffix.toLowerCase() + ".xml");
+            hadoopJobConfFile = (HADOOP_JOB_CONF_FILENAME + "_" + suffix.toLowerCase(Locale.ROOT) + ".xml");
         } else {
             hadoopJobConfFile = (HADOOP_JOB_CONF_FILENAME + ".xml");
         }
@@ -72,7 +73,7 @@ public class JobEngineConfig {
 
     /**
      *
-     * @param suffix job config file suffix name; if be null, will use the default job conf
+     * @param jobType job config file suffix name; if is null, will use the default job conf
      * @return the job config file path
      * @throws IOException
      */
@@ -92,20 +93,7 @@ public class JobEngineConfig {
                 }
             }
         }
-        logger.info("Chosen job conf is : " + path);
         return path;
-    }
-
-    public String getHiveConfFilePath() throws IOException {
-        String hiveConfFile = (HIVE_CONF_FILENAME + ".xml");
-
-        File jobConfig = getJobConfig(hiveConfFile);
-        if (jobConfig == null || !jobConfig.exists()) {
-
-            logger.error("fail to locate " + HIVE_CONF_FILENAME + ".xml");
-            throw new RuntimeException("fail to locate " + HIVE_CONF_FILENAME + ".xml");
-        }
-        return OptionsHelper.convertToFileURL(jobConfig.getAbsolutePath());
     }
 
     // there should be no setters
@@ -117,6 +105,20 @@ public class JobEngineConfig {
 
     public KylinConfig getConfig() {
         return config;
+    }
+
+    /**
+     * @return if consider job priority when scheduling jobs
+     * */
+    public boolean getJobPriorityConsidered() {
+        return config.getSchedulerPriorityConsidered();
+    }
+
+    /**
+     * @return the priority bar for fetching jobs from job priority queue
+     */
+    public int getFetchQueuePriorityBar() {
+        return config.getSchedulerPriorityBarFetchFromQueue();
     }
 
     public String getHdfsWorkingDirectory() {
@@ -145,17 +147,14 @@ public class JobEngineConfig {
     }
 
     /**
-     * @return the jobStepTimeout
-     */
-    public long getJobStepTimeout() {
-        return config.getJobStepTimeout();
-    }
-
-    /**
      * @return the asyncJobCheckInterval
      */
     public int getAsyncJobCheckInterval() {
         return config.getYarnStatusCheckIntervalSeconds();
+    }
+    
+    public int getPollIntervalSecond() {
+        return config.getSchedulerPollIntervalSecond();
     }
 
     /*

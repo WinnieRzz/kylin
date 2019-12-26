@@ -21,6 +21,7 @@ package org.apache.kylin.cube.model;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.LinkedList;
+import java.util.Locale;
 
 import org.apache.kylin.common.util.StringUtil;
 import org.apache.kylin.metadata.model.FunctionDesc;
@@ -33,7 +34,7 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 /**
  */
 @JsonAutoDetect(fieldVisibility = Visibility.NONE, getterVisibility = Visibility.NONE, isGetterVisibility = Visibility.NONE, setterVisibility = Visibility.NONE)
-public class HBaseMappingDesc {
+public class HBaseMappingDesc implements java.io.Serializable {
 
     @JsonProperty("column_family")
     private HBaseColumnFamilyDesc[] columnFamily;
@@ -79,12 +80,30 @@ public class HBaseMappingDesc {
         cubeRef = cubeDesc;
 
         for (HBaseColumnFamilyDesc cf : columnFamily) {
-            cf.setName(cf.getName().toUpperCase());
+            cf.setName(cf.getName().toUpperCase(Locale.ROOT));
 
             for (HBaseColumnDesc c : cf.getColumns()) {
-                c.setQualifier(c.getQualifier().toUpperCase());
+                c.setQualifier(c.getQualifier().toUpperCase(Locale.ROOT));
                 StringUtil.toUpperCaseArray(c.getMeasureRefs(), c.getMeasureRefs());
             }
+        }
+    }
+
+    public void initAsSeparatedColumns(CubeDesc cubeDesc) {
+        cubeRef = cubeDesc;
+
+        int cfNum = cubeDesc.getMeasures().size();
+        columnFamily = new HBaseColumnFamilyDesc[cfNum];
+
+        for (int i = 0; i < cfNum; i++) {
+            HBaseColumnFamilyDesc cf = new HBaseColumnFamilyDesc();
+            HBaseColumnDesc col = new HBaseColumnDesc();
+            String measureRef = cubeDesc.getMeasures().get(i).getName();
+            col.setMeasureRefs(new String[] { measureRef });
+            col.setQualifier("M");
+            cf.setColumns(new HBaseColumnDesc[] { col });
+            cf.setName("F" + (i + 1));
+            columnFamily[i] = cf;
         }
     }
 

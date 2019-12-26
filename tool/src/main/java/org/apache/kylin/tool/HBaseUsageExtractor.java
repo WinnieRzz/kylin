@@ -35,6 +35,7 @@ import org.apache.hadoop.hbase.zookeeper.ZooKeeperWatcher;
 import org.apache.kylin.common.KylinConfig;
 import org.apache.kylin.common.util.CliCommandExecutor;
 import org.apache.kylin.common.util.OptionsHelper;
+import org.apache.kylin.common.util.StringUtil;
 import org.apache.kylin.cube.CubeInstance;
 import org.apache.kylin.cube.CubeManager;
 import org.apache.kylin.cube.CubeSegment;
@@ -51,7 +52,7 @@ import com.google.common.collect.Lists;
 
 public class HBaseUsageExtractor extends AbstractInfoExtractor {
 
-    private static final Logger logger = LoggerFactory.getLogger(CubeMetaExtractor.class);
+    private static final Logger logger = LoggerFactory.getLogger(HBaseUsageExtractor.class);
     @SuppressWarnings("static-access")
     private static final Option OPTION_CUBE = OptionBuilder.withArgName("cube").hasArg().isRequired(false).withDescription("Specify which cube to extract").create("cube");
     @SuppressWarnings("static-access")
@@ -101,7 +102,7 @@ public class HBaseUsageExtractor extends AbstractInfoExtractor {
 
         if (optionsHelper.hasOption(OPTION_PROJECT)) {
             String projectNames = optionsHelper.getOptionValue(OPTION_PROJECT);
-            for (String projectName: projectNames.split(",")) {
+            for (String projectName : StringUtil.splitByComma(projectNames)) {
                 ProjectInstance projectInstance = projectManager.getProject(projectName);
                 if (projectInstance == null) {
                     throw new IllegalArgumentException("Project " + projectName + " does not exist");
@@ -113,7 +114,7 @@ public class HBaseUsageExtractor extends AbstractInfoExtractor {
             }
         } else if (optionsHelper.hasOption(OPTION_CUBE)) {
             String cubeNames = optionsHelper.getOptionValue(OPTION_CUBE);
-            for (String cubeName : cubeNames.split(",")) {
+            for (String cubeName : StringUtil.splitByComma(cubeNames)) {
                 IRealization realization = cubeManager.getRealization(cubeName);
                 if (realization != null) {
                     retrieveResourcePath(realization);

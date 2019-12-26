@@ -18,107 +18,106 @@
 
 package org.apache.kylin.cube.model;
 
-import java.util.ArrayList;
+import java.io.Serializable;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 
-import org.apache.kylin.common.util.BytesSplitter;
 import org.apache.kylin.cube.CubeSegment;
-import org.apache.kylin.cube.cuboid.Cuboid;
 import org.apache.kylin.metadata.model.DataModelDesc;
 import org.apache.kylin.metadata.model.FunctionDesc;
 import org.apache.kylin.metadata.model.IJoinedFlatTableDesc;
-import org.apache.kylin.metadata.model.IntermediateColumnDesc;
-import org.apache.kylin.metadata.model.JoinDesc;
+import org.apache.kylin.metadata.model.ISegment;
 import org.apache.kylin.metadata.model.MeasureDesc;
+import org.apache.kylin.metadata.model.SegmentRange;
 import org.apache.kylin.metadata.model.TblColRef;
 
+import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 
 /**
  */
-public class CubeJoinedFlatTableDesc implements IJoinedFlatTableDesc {
+@SuppressWarnings("serial")
+public class CubeJoinedFlatTableDesc implements IJoinedFlatTableDesc, Serializable {
 
-    private String tableName;
-    private final CubeDesc cubeDesc;
-    private final CubeSegment cubeSegment;
+    protected String tableName;
+    protected final CubeDesc cubeDesc;
+    protected final CubeSegment cubeSegment;
+    protected final boolean includingDerived;
 
-    private int columnCount;
-    private int[] rowKeyColumnIndexes; // the column index on flat table
-    private int[][] measureColumnIndexes; // [i] is the i.th measure related column index on flat table
+    private int columnCount = 0;
+    private List<TblColRef> columnList = Lists.newArrayList();
+    private Map<TblColRef, Integer> columnIndexMap = Maps.newHashMap();
 
-    private List<IntermediateColumnDesc> columnList = Lists.newArrayList();
-
-    private Map<String, Integer> columnIndexMap;
-
-    private List<JoinDesc> cubeJoins;
-
-    public CubeJoinedFlatTableDesc(CubeDesc cubeDesc, CubeSegment cubeSegment) {
-        this.cubeDesc = cubeDesc;
-        this.cubeSegment = cubeSegment;
-        this.columnIndexMap = Maps.newHashMap();
-        this.cubeJoins = new ArrayList<JoinDesc>(cubeDesc.getDimensions().size());
-        parseCubeDesc();
+    public CubeJoinedFlatTableDesc(CubeDesc cubeDesc) {
+        this(cubeDesc, null, false);
     }
 
-    /**
-     * @return the cubeSegment
-     */
-    public CubeSegment getCubeSegment() {
-        return cubeSegment;
+    public CubeJoinedFlatTableDesc(CubeDesc cubeDesc, boolean includingDerived) {
+        this(cubeDesc, null, includingDerived);
+    }
+
+    public CubeJoinedFlatTableDesc(CubeSegment cubeSegment) {
+        this(cubeSegment.getCubeDesc(), cubeSegment, false);
+    }
+
+    public CubeJoinedFlatTableDesc(CubeSegment cubeSegment, boolean includingDerived) {
+        this(cubeSegment.getCubeDesc(), cubeSegment, includingDerived);
+    }
+
+    private CubeJoinedFlatTableDesc(CubeDesc cubeDesc, CubeSegment cubeSegment /* can be null */,
+            boolean includingDerived) {
+        this.cubeDesc = cubeDesc;
+        this.cubeSegment = cubeSegment;
+
+        this.tableName = makeTableName(cubeDesc, cubeSegment);
+        this.includingDerived = includingDerived;
+        initParseCubeDesc();
+    }
+
+    protected String makeTableName(CubeDesc cubeDesc, CubeSegment cubeSegment) {
+        if (cubeSegment == null) {
+            return cubeDesc.getConfig().getHiveIntermediateTablePrefix() + cubeDesc.getName().toLowerCase(Locale.ROOT);
+        } else {
+            return cubeDesc.getConfig().getHiveIntermediateTablePrefix() + cubeDesc.getName().toLowerCase(Locale.ROOT) + "_"
+                    + cubeSegment.getUuid().replaceAll("-", "_");
+        }
+    }
+
+    protected final void initAddColumn(TblColRef col) {
+        if (columnIndexMap.containsKey(col))
+            return;
+
+        int columnIndex = columnIndexMap.size();
+        columnIndexMap.put(col, columnIndex);
+        columnList.add(col);
+        columnCount = columnIndexMap.size();
+
+        Preconditions.checkState(columnIndexMap.size() == columnList.size());
     }
 
     // check what columns from hive tables are required, and index them
-    private void parseCubeDesc() {
-        int rowkeyColCount = cubeDesc.getRowkey().getRowKeyColumns().length;
-        long baseCuboidId = Cuboid.getBaseCuboidId(cubeDesc);
-        Cuboid baseCuboid = Cuboid.findById(cubeDesc, baseCuboidId);
-
-        if (cubeSegment == null) {
-            this.tableName = "kylin_intermediate_" + cubeDesc.getName();
-        } else {
-            this.tableName = "kylin_intermediate_" + cubeDesc.getName() + "_" + cubeSegment.getName();
-        }
-
-        int columnIndex = 0;
-        for (TblColRef col : cubeDesc.listDimensionColumnsExcludingDerived(false)) {
-            columnIndexMap.put(colName(col.getCanonicalName()), columnIndex);
-            columnList.add(new IntermediateColumnDesc(String.valueOf(columnIndex), col));
-            columnIndex++;
-        }
-
-        // build index for rowkey columns
-        List<TblColRef> cuboidColumns = baseCuboid.getColumns();
-        rowKeyColumnIndexes = new int[rowkeyColCount];
-        for (int i = 0; i < rowkeyColCount; i++) {
-            String colName = colName(cuboidColumns.get(i).getCanonicalName());
-            Integer dimIdx = columnIndexMap.get(colName);
-            if (dimIdx == null) {
-                throw new RuntimeException("Can't find column " + colName);
+    protected void initParseCubeDesc() {
+        if (this.includingDerived) {
+            for (TblColRef col : cubeDesc.listDimensionColumnsIncludingDerived()) {
+                initAddColumn(col);
             }
-            rowKeyColumnIndexes[i] = dimIdx;
+        } else {
+            for (TblColRef col : cubeDesc.listDimensionColumnsExcludingDerived(false)) {
+                initAddColumn(col);
+            }
         }
 
         List<MeasureDesc> measures = cubeDesc.getMeasures();
         int measureSize = measures.size();
-        measureColumnIndexes = new int[measureSize][];
         for (int i = 0; i < measureSize; i++) {
             FunctionDesc func = measures.get(i).getFunction();
             List<TblColRef> colRefs = func.getParameter().getColRefs();
-            if (colRefs == null) {
-                measureColumnIndexes[i] = null;
-            } else {
-                measureColumnIndexes[i] = new int[colRefs.size()];
+            if (colRefs != null) {
                 for (int j = 0; j < colRefs.size(); j++) {
                     TblColRef c = colRefs.get(j);
-                    measureColumnIndexes[i][j] = contains(columnList, c);
-                    if (measureColumnIndexes[i][j] < 0) {
-                        measureColumnIndexes[i][j] = columnIndex;
-                        columnIndexMap.put(colName(c.getCanonicalName()), columnIndex);
-                        columnList.add(new IntermediateColumnDesc(String.valueOf(columnIndex), c));
-                        columnIndex++;
-                    }
+                    initAddColumn(c);
                 }
             }
         }
@@ -126,69 +125,38 @@ public class CubeJoinedFlatTableDesc implements IJoinedFlatTableDesc {
         if (cubeDesc.getDictionaries() != null) {
             for (DictionaryDesc dictDesc : cubeDesc.getDictionaries()) {
                 TblColRef c = dictDesc.getColumnRef();
-                if (contains(columnList, c) < 0) {
-                    columnIndexMap.put(colName(c.getCanonicalName()), columnIndex);
-                    columnList.add(new IntermediateColumnDesc(String.valueOf(columnIndex), c));
-                    columnIndex++;
-                }
+                initAddColumn(c);
                 if (dictDesc.getResuseColumnRef() != null) {
                     c = dictDesc.getResuseColumnRef();
-                    if (contains(columnList, c) < 0) {
-                        columnIndexMap.put(colName(c.getCanonicalName()), columnIndex);
-                        columnList.add(new IntermediateColumnDesc(String.valueOf(columnIndex), c));
-                        columnIndex++;
-                    }
+                    initAddColumn(c);
                 }
             }
         }
+    }
 
-        columnCount = columnIndex;
-
-        for (DimensionDesc d : cubeDesc.getDimensions()) {
-            if (d.getJoin() != null) {
-                cubeJoins.add(d.getJoin());
+    @Override
+    public List<TblColRef> getFactColumns() {
+        final List<TblColRef> factColumns = Lists.newArrayList();
+        for (TblColRef col : this.getAllColumns()) {
+            if (col.getTableRef().equals(getDataModel().getRootFactTable())) {
+                // only fetch the columns from fact table
+                factColumns.add(col);
             }
         }
+        return factColumns;
     }
 
-    private int contains(List<IntermediateColumnDesc> columnList, TblColRef c) {
-        for (int i = 0; i < columnList.size(); i++) {
-            IntermediateColumnDesc col = columnList.get(i);
-
-            if (col.isSameAs(c.getTable(), c.getName()))
-                return i;
-        }
-        return -1;
+    public int getColumnCount() {
+        return columnCount;
     }
-
-    // sanity check the input record (in bytes) matches what's expected
-    public void sanityCheck(BytesSplitter bytesSplitter) {
-        if (columnCount != bytesSplitter.getBufferSize()) {
-            throw new IllegalArgumentException("Expect " + columnCount + " columns, but see " + bytesSplitter.getBufferSize() + " -- " + bytesSplitter);
-        }
-
-        // TODO: check data types here
-    }
-
-    public CubeDesc getCubeDesc() {
-        return cubeDesc;
-    }
-
-    public int[] getRowKeyColumnIndexes() {
-        return rowKeyColumnIndexes;
-    }
-
-    public int[][] getMeasureColumnIndexes() {
-        return measureColumnIndexes;
-    }
-
+    
     @Override
     public String getTableName() {
         return tableName;
     }
 
     @Override
-    public List<IntermediateColumnDesc> getColumnList() {
+    public List<TblColRef> getAllColumns() {
         return columnList;
     }
 
@@ -198,21 +166,40 @@ public class CubeJoinedFlatTableDesc implements IJoinedFlatTableDesc {
     }
 
     @Override
-    public List<JoinDesc> getUsedJoinsSet() {
-        return cubeJoins;
-    }
-
-    private static String colName(String canonicalColName) {
-        return canonicalColName.replace(".", "_");
-    }
-
     public int getColumnIndex(TblColRef colRef) {
-        String key = colName(colRef.getCanonicalName());
-        Integer index = columnIndexMap.get(key);
+        Integer index = columnIndexMap.get(colRef);
         if (index == null)
-            throw new IllegalArgumentException("Column " + colRef.toString() + " wasn't found on flat table.");
+            return -1;
 
         return index.intValue();
+    }
+
+    @Override
+    public SegmentRange getSegRange() {
+        if (cubeSegment.isOffsetCube()) {
+            return null;
+        }
+        return cubeSegment.getSegRange();
+    }
+
+    @Override
+    public TblColRef getDistributedBy() {
+        return cubeDesc.getDistributedByColumn();
+    }
+
+    @Override
+    public ISegment getSegment() {
+        return cubeSegment;
+    }
+
+    @Override
+    public boolean useAlias() {
+        return true;
+    }
+
+    @Override
+    public TblColRef getClusterBy() {
+        return cubeDesc.getClusteredByColumn();
     }
 
 }

@@ -21,10 +21,14 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
 
 import org.apache.kylin.common.KylinConfig;
 import org.apache.kylin.common.persistence.ResourceStore;
 import org.apache.kylin.common.persistence.RootPersistentEntity;
+import org.apache.kylin.cube.CubeInstance;
+import org.apache.kylin.cube.CubeManager;
+import org.apache.kylin.metadata.model.ColumnDesc;
 import org.apache.kylin.metadata.model.DataModelDesc;
 import org.apache.kylin.metadata.model.MeasureDesc;
 import org.apache.kylin.metadata.model.TblColRef;
@@ -48,35 +52,7 @@ import com.google.common.collect.Lists;
 @JsonAutoDetect(fieldVisibility = JsonAutoDetect.Visibility.NONE, getterVisibility = JsonAutoDetect.Visibility.NONE, isGetterVisibility = JsonAutoDetect.Visibility.NONE, setterVisibility = JsonAutoDetect.Visibility.NONE)
 public class HybridInstance extends RootPersistentEntity implements IRealization {
 
-    @JsonIgnore
-    private KylinConfig config;
-
-    @JsonProperty("name")
-    private String name;
-
-    public void setRealizationEntries(List<RealizationEntry> realizationEntries) {
-        this.realizationEntries = realizationEntries;
-    }
-
-    @JsonProperty("realizations")
-    private List<RealizationEntry> realizationEntries;
-
-    @JsonProperty("cost")
-    private int cost = 50;
-
-    private volatile IRealization[] realizations = null;
-    private List<TblColRef> allDimensions = null;
-    private List<TblColRef> allColumns = null;
-    private List<MeasureDesc> allMeasures = null;
-    private long dateRangeStart;
-    private long dateRangeEnd;
-    private boolean isReady = false;
-
     private final static Logger logger = LoggerFactory.getLogger(HybridInstance.class);
-
-    public List<RealizationEntry> getRealizationEntries() {
-        return realizationEntries;
-    }
 
     public static HybridInstance create(KylinConfig config, String name, List<RealizationEntry> realizationEntries) {
         HybridInstance hybridInstance = new HybridInstance();
@@ -89,6 +65,42 @@ public class HybridInstance extends RootPersistentEntity implements IRealization
         return hybridInstance;
     }
 
+    // ============================================================================
+
+    @JsonIgnore
+    private KylinConfig config;
+
+    @JsonProperty("name")
+    private String name;
+
+    @JsonProperty("realizations")
+    private List<RealizationEntry> realizationEntries;
+
+    @JsonProperty("cost")
+    private int cost = 50;
+
+    private volatile IRealization[] realizations = null;
+    private List<TblColRef> allDimensions = null;
+    private Set<TblColRef> allColumns = null;
+    private Set<ColumnDesc> allColumnDescs = null;
+    private List<MeasureDesc> allMeasures = null;
+    private long dateRangeStart;
+    private long dateRangeEnd;
+    private boolean isReady = false;
+
+    @Override
+    public String resourceName() {
+        return name;
+    }
+
+    public List<RealizationEntry> getRealizationEntries() {
+        return realizationEntries;
+    }
+
+    public void setRealizationEntries(List<RealizationEntry> realizationEntries) {
+        this.realizationEntries = realizationEntries;
+    }
+
     private void init() {
         if (realizations != null)
             return;
@@ -98,7 +110,7 @@ public class HybridInstance extends RootPersistentEntity implements IRealization
                 return;
 
             if (realizationEntries == null || realizationEntries.size() == 0)
-                throw new IllegalArgumentException();
+                return;
 
             RealizationRegistry registry = RealizationRegistry.getInstance(config);
             List<IRealization> realizationList = Lists.newArrayList();
@@ -136,7 +148,8 @@ public class HybridInstance extends RootPersistentEntity implements IRealization
             }
 
             allDimensions = Lists.newArrayList(dimensions);
-            allColumns = Lists.newArrayList(columns);
+            allColumns = columns;
+            allColumnDescs = asColumnDescs(allColumns);
             allMeasures = Lists.newArrayList(measures);
 
             Collections.sort(realizationList, new Comparator<IRealization>() {
@@ -165,6 +178,14 @@ public class HybridInstance extends RootPersistentEntity implements IRealization
         }
     }
 
+    private Set<ColumnDesc> asColumnDescs(Set<TblColRef> columns) {
+        LinkedHashSet<ColumnDesc> result = new LinkedHashSet<>();
+        for (TblColRef col : columns) {
+            result.add(col.getColumnDesc());
+        }
+        return result;
+    }
+
     @Override
     public CapabilityResult isCapable(SQLDigest digest) {
         CapabilityResult result = new CapabilityResult();
@@ -176,6 +197,8 @@ public class HybridInstance extends RootPersistentEntity implements IRealization
                 result.capable = true;
                 result.cost = Math.min(result.cost, child.cost);
                 result.influences.addAll(child.influences);
+            } else {
+                result.incapableCause = child.incapableCause;
             }
         }
 
@@ -186,26 +209,43 @@ public class HybridInstance extends RootPersistentEntity implements IRealization
     }
 
     @Override
+    public int getCost() {
+        int c = Integer.MAX_VALUE;
+        for (IRealization realization : getRealizations()) {
+            c = Math.min(realization.getCost(), c);
+        }
+        return c;
+    }
+
+    @Override
     public RealizationType getType() {
         return RealizationType.HYBRID;
     }
 
     @Override
-    public DataModelDesc getDataModelDesc() {
-        if (this.getLatestRealization() != null)
-            return this.getLatestRealization().getDataModelDesc();
+    public DataModelDesc getModel() {
+        if (this.getLatestRealization() != null) {
+            return this.getLatestRealization().getModel();
+        }
+        // all included cubes are disabled
+        if (this.getRealizationEntries() != null && this.getRealizationEntries().size() > 0) {
+            String cubeName = this.getRealizationEntries().get(0).getRealization();
+            CubeInstance cubeInstance = CubeManager.getInstance(config).getCube(cubeName);
+            return cubeInstance.getModel();
+        }
         return null;
     }
 
     @Override
-    public String getFactTable() {
-        return getRealizations()[0].getFactTable();
+    public Set<TblColRef> getAllColumns() {
+        init();
+        return allColumns;
     }
 
     @Override
-    public List<TblColRef> getAllColumns() {
+    public Set<ColumnDesc> getAllColumnDescs() {
         init();
-        return allColumns;
+        return allColumnDescs;
     }
 
     @Override
@@ -238,6 +278,7 @@ public class HybridInstance extends RootPersistentEntity implements IRealization
         return getType() + "[name=" + name + "]";
     }
 
+    @Override
     public KylinConfig getConfig() {
         return config;
     }
@@ -257,8 +298,8 @@ public class HybridInstance extends RootPersistentEntity implements IRealization
     }
 
     @Override
-    public String getModelName() {
-        return this.getLatestRealization().getModelName();
+    public boolean supportsLimitPushDown() {
+        return false;
     }
 
     @Override
@@ -269,7 +310,7 @@ public class HybridInstance extends RootPersistentEntity implements IRealization
 
     public IRealization[] getRealizations() {
         init();
-        return realizations;
+        return realizations == null ? new IRealization[0] : realizations;
     }
 
     public String getResourcePath() {

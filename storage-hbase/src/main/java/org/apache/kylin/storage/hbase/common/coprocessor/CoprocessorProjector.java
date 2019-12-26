@@ -40,18 +40,18 @@ public class CoprocessorProjector {
 
         RowKeyEncoder rowKeyMaskEncoder = new RowKeyEncoder(cubeSegment, cuboid) {
             @Override
-            protected void fillHeader(byte[] bytes) {
+            public void fillHeader(byte[] bytes) {
                 Arrays.fill(bytes, 0, this.getHeaderLength(), (byte) 0xff);
             }
 
             @Override
-            protected void fillColumnValue(TblColRef column, int columnLen, byte[] value, int valueLen, byte[] outputValue, int outputValueOffset) {
+            protected void fillColumnValue(TblColRef column, int columnLen, String valueStr, byte[] outputValue, int outputValueOffset) {
                 byte bits = dimensionColumns.contains(column) ? (byte) 0xff : 0x00;
                 Arrays.fill(outputValue, outputValueOffset, outputValueOffset + columnLen, bits);
             }
         };
 
-        byte[] mask = rowKeyMaskEncoder.encode(new byte[cuboid.getColumns().size()][]);
+        byte[] mask = rowKeyMaskEncoder.encode(new String[cuboid.getColumns().size()]);
         return new CoprocessorProjector(mask, dimensionColumns.size() != 0);
     }
   

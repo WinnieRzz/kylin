@@ -25,8 +25,10 @@ import java.util.Calendar;
 import java.util.Collection;
 import java.util.Date;
 import java.util.List;
+import java.util.Locale;
 import java.util.Random;
 
+import java.util.TimeZone;
 import org.apache.kylin.common.util.LocalFileMetadataTestCase;
 import org.apache.kylin.metadata.filter.CaseTupleFilter;
 import org.apache.kylin.metadata.filter.ColumnTupleFilter;
@@ -38,7 +40,6 @@ import org.apache.kylin.metadata.filter.LogicalTupleFilter;
 import org.apache.kylin.metadata.filter.StringCodeSystem;
 import org.apache.kylin.metadata.filter.TupleFilter;
 import org.apache.kylin.metadata.filter.TupleFilter.FilterOperatorEnum;
-import org.apache.kylin.metadata.model.ColumnDesc;
 import org.apache.kylin.metadata.model.TableDesc;
 import org.apache.kylin.metadata.model.TblColRef;
 import org.apache.kylin.metadata.tuple.Tuple;
@@ -71,14 +72,12 @@ public class FilterBaseTest extends LocalFileMetadataTestCase {
         List<TblColRef> groups = new ArrayList<TblColRef>();
 
         TableDesc t1 = TableDesc.mockup("DEFAULT.TEST_KYLIN_FACT");
-        ColumnDesc c1 = ColumnDesc.mockup(t1, 2, "CAL_DT", "string");
-        TblColRef cf1 = c1.getRef();
-        groups.add(cf1);
+        TblColRef c1 = TblColRef.mockup(t1, 2, "CAL_DT", "string");
+        groups.add(c1);
 
         TableDesc t2 = TableDesc.mockup("DEFAULT.TEST_CATEGORY_GROUPINGS");
-        ColumnDesc c2 = ColumnDesc.mockup(t2, 14, "META_CATEG_NAME", "string");
-        TblColRef cf2 = c2.getRef();
-        groups.add(cf2);
+        TblColRef c2 = TblColRef.mockup(t2, 14, "META_CATEG_NAME", "string");
+        groups.add(c2);
 
         return groups;
     }
@@ -104,12 +103,12 @@ public class FilterBaseTest extends LocalFileMetadataTestCase {
         compareFilter.addChild(columnFilter);
 
         List<String> inValues = Lists.newArrayList();
-        SimpleDateFormat simpleDateFormat = new SimpleDateFormat("yyyy-MM-dd");
+        SimpleDateFormat simpleDateFormat = new SimpleDateFormat("yyyy-MM-dd", Locale.ROOT);
         Date startDate = simpleDateFormat.parse("1970-01-01");
         Date endDate = simpleDateFormat.parse("2100-01-01");
-        Calendar start = Calendar.getInstance();
+        Calendar start = Calendar.getInstance(TimeZone.getTimeZone("GMT"), Locale.ROOT);
         start.setTime(startDate);
-        Calendar end = Calendar.getInstance();
+        Calendar end = Calendar.getInstance(TimeZone.getTimeZone("GMT"), Locale.ROOT);
         end.setTime(endDate);
         for (Date date = start.getTime(); start.before(end); start.add(Calendar.DATE, 1), date = start.getTime()) {
             inValues.add(simpleDateFormat.format(date));
@@ -176,8 +175,8 @@ public class FilterBaseTest extends LocalFileMetadataTestCase {
         return compareFilter;
     }
 
-    protected CompareTupleFilter buildCompareDynamicFilter(List<TblColRef> groups) {
-        CompareTupleFilter compareFilter = new CompareTupleFilter(FilterOperatorEnum.EQ);
+    protected CompareTupleFilter buildCompareDynamicFilter(List<TblColRef> groups, FilterOperatorEnum operator) {
+        CompareTupleFilter compareFilter = new CompareTupleFilter(operator);
         compareFilter.addChild(new ColumnTupleFilter(groups.get(0)));
         compareFilter.addChild(new DynamicTupleFilter("?0"));
         compareFilter.bindVariable("?0", "abc");

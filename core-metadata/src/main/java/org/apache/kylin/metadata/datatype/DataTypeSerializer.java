@@ -18,9 +18,12 @@
 
 package org.apache.kylin.metadata.datatype;
 
+import java.io.IOException;
+import java.io.ObjectInputStream;
 import java.nio.ByteBuffer;
 import java.util.Map;
 
+import org.apache.kylin.common.threadlocal.InternalThreadLocal;
 import org.apache.kylin.common.util.BytesSerializer;
 
 import com.google.common.collect.Maps;
@@ -28,9 +31,11 @@ import com.google.common.collect.Maps;
 /**
  * Note: the implementations MUST be thread-safe.
  */
-abstract public class DataTypeSerializer<T> implements BytesSerializer<T> {
+@SuppressWarnings("serial")
+abstract public class DataTypeSerializer<T> implements BytesSerializer<T>, java.io.Serializable {
 
     final static Map<String, Class<?>> implementations = Maps.newHashMap();
+    protected transient InternalThreadLocal current = new InternalThreadLocal();
     static {
         implementations.put("char", StringSerializer.class);
         implementations.put("varchar", StringSerializer.class);
@@ -82,8 +87,25 @@ abstract public class DataTypeSerializer<T> implements BytesSerializer<T> {
     /** Get an estimate of the average size in bytes of this kind of serialized data */
     abstract public int getStorageBytesEstimate();
 
+    protected double getStorageBytesEstimate(double count) {
+        return 0;
+    }
+
     /** An optional convenient method that converts a string to this data type (for dimensions) */
     public T valueOf(String str) {
+        throw new UnsupportedOperationException();
+    }
+
+    /** If the query is exactAggregation and has some memory hungry measures,
+     * we could directly return final result to speed up the query.
+     * If the DataTypeSerializer support this,
+     * which should override the getFinalResult method, besides that, the deserialize and peekLength method should also support it, like {@link org.apache.kylin.measure.bitmap.BitmapSerializer} */
+    public boolean supportDirectReturnResult() {
+        return false;
+    }
+
+    /** An optional method that converts a expensive buffer to lightweight buffer containing final result (for memory hungry measures) */
+    public ByteBuffer getFinalResult(ByteBuffer in) {
         throw new UnsupportedOperationException();
     }
 
@@ -93,5 +115,10 @@ abstract public class DataTypeSerializer<T> implements BytesSerializer<T> {
             return "NULL";
         else
             return value.toString();
+    }
+
+    private void readObject(ObjectInputStream in) throws IOException, ClassNotFoundException {
+        in.defaultReadObject();
+        current = new InternalThreadLocal();
     }
 }

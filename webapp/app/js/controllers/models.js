@@ -18,7 +18,7 @@
 
 'use strict';
 
-KylinApp.controller('ModelsCtrl', function ($scope, $q, $routeParams, $location, $window, $modal, MessageService, CubeDescService, CubeService, JobService, UserService, ProjectService, SweetAlert, loadingRequest, $log, modelConfig, ProjectModel, ModelService, MetaModel, modelsManager, cubesManager, TableModel, $animate) {
+KylinApp.controller('ModelsCtrl', function ($scope, $q, $routeParams, $location, $window, $modal, MessageService, CubeDescService, CubeService, JobService, UserService, ProjectService, SweetAlert, loadingRequest, $log, modelConfig, ProjectModel, ModelService, MetaModel, modelsManager, cubesManager, TableModel, AccessService, MessageBox, CubeList) {
 
   //tree data
 
@@ -110,7 +110,7 @@ KylinApp.controller('ModelsCtrl', function ($scope, $q, $routeParams, $location,
         ModelService.drop({modelId: model.name}, {}, function (result) {
           loadingRequest.hide();
 //                    CubeList.removeCube(cube);
-          SweetAlert.swal('Success!', 'Model drop is done successfully', 'success');
+          MessageBox.successNotify('Model drop is done successfully');
           location.reload();
         }, function (e) {
           loadingRequest.hide();
@@ -127,6 +127,37 @@ KylinApp.controller('ModelsCtrl', function ($scope, $q, $routeParams, $location,
     });
   };
 
+  $scope.editModel = function(model, isEditJson){
+    var cubename = [];
+    var modelstate=false;
+    var i=0;
+
+    CubeService.list({modelName:model.name,projectName:$scope.projectModel.selectedProject}, function (_cubes) {
+      model.cubes = _cubes;
+
+      if (model.cubes.length != 0) {
+        angular.forEach(model.cubes,function(cube){
+          if (cube.status=="READY"){
+            modelstate=true;
+            cubename[i] =cube.name;
+            i++;
+          }
+        })
+      }
+
+      if (modelstate==false){
+    	  if (isEditJson) {
+    		  $location.path("/models/edit/" + model.name + "/descriptionjson");
+    	  } else {
+    		  $location.path("/models/edit/" + model.name);
+    	  }
+      } else {
+        SweetAlert.swal('Sorry','This model is still used by '+ cubename.join(','));
+      }
+    })
+
+  };
+
   $scope.cloneModel = function(model){
     $modal.open({
       templateUrl: 'modelClone.html',
@@ -140,6 +171,34 @@ KylinApp.controller('ModelsCtrl', function ($scope, $q, $routeParams, $location,
     });
   }
 
+  $scope.listCubes = function(model) {
+    var defer = $q.defer();
+    var queryParam = {modelName: model.name};
+    if (!$scope.projectModel.isSelectedProjectValid() || !$scope.projectModel.projects.length) {
+      SweetAlert.swal('Oops...', "Please select target project.", 'info');
+      defer.resolve([]);
+      return defer.promise;
+    }
+
+    queryParam.projectName = $scope.projectModel.selectedProject;
+
+    $scope.loading = true;
+    CubeList.removeAll();
+    return CubeList.list(queryParam).then(function (resp) {
+      angular.forEach(CubeList.cubes, function(cube, index) {
+      })
+
+      $scope.loading = false;
+      defer.resolve(resp);
+      return defer.promise;
+
+    }, function(resp) {
+      $scope.loading = false;
+      defer.resolve([]);
+      SweetAlert.swal('Oops...', resp, 'error');
+      return defer.promise;
+    });
+  }
 
 
   $scope.openModal = function (model) {
@@ -155,7 +214,59 @@ KylinApp.controller('ModelsCtrl', function ($scope, $q, $routeParams, $location,
     });
   };
 
+  function changePositionOfScrollBar(){
+    //get which button be clicked
+    var btn = window.event.srcElement || window.event.target;
+    //get current position of scroll bar
+    var scrollTop =$("#cube_model_trees").scrollTop();
+    //get total length of scroll bar
+    var scrollHeight  = document.getElementById('cube_model_trees').scrollHeight;
+    //get the position of clicked button relative to the top of window
+    var offsetTop  =$(btn).offset().top;
+    //get the position of the container relative to the top of window
+    var treeOffsetTop = $("#cube_model_trees").offset().top;
+
+    //distance from button to the top of tree model container
+    var minor = offsetTop - treeOffsetTop;
+    //height of tree model container
+    var  viewH =$("#cube_model_trees").height();
+
+    //change scroll bar to show the dropdown menu
+    if(minor + 100 > viewH){//100 is the height of dropdowm menu
+      if((scrollHeight - scrollTop - viewH)>=minor+100-viewH){
+        document.getElementById('cube_model_trees').scrollTop+=(minor+120-viewH);
+      }else{
+        var node=document.createElement("LI");
+        node.style.height = (minor+120-viewH)+"px";
+        document.getElementById("models-tree").appendChild(node);
+        var  viewH =$("#cube_model_trees").height();//可见高度
+        document.getElementById('cube_model_trees').scrollTop+=(minor+120-viewH);
+
+      }
+    }
+  }
+
+  $scope.listModelAccess = function (model) {
+    changePositionOfScrollBar();
+
+    if(model.uuid){
+      AccessService.list({type: "DataModelDesc", uuid: model.uuid}, function (accessEntities) {
+        model.accessEntities = accessEntities;
+        try {
+          if (!model.owner) {
+            model.owner = accessEntities[0].sid.principal;
+          }
+        } catch (error) {
+          $log.error("No acl info.");
+        }
+      })
+    }
+
+
+  };
+
   var ModelDetailModalCtrl = function ($scope, $location, $modalInstance, scope) {
+    modelsManager.selectedModel.visiblePage='metadata';
     $scope.cancel = function () {
       $modalInstance.dismiss('cancel');
     };
@@ -164,7 +275,7 @@ KylinApp.controller('ModelsCtrl', function ($scope, $q, $routeParams, $location,
 });
 
 
-var modelCloneCtrl = function ($scope, $modalInstance, CubeService, MessageService, $location, model, MetaModel, SweetAlert,ProjectModel, loadingRequest,ModelService) {
+var modelCloneCtrl = function ($scope, $modalInstance, CubeService, MessageService, $location, model, MetaModel, SweetAlert,ProjectModel, loadingRequest,ModelService, MessageBox) {
   $scope.projectModel = ProjectModel;
 
   $scope.targetObj={
@@ -202,7 +313,7 @@ var modelCloneCtrl = function ($scope, $modalInstance, CubeService, MessageServi
         loadingRequest.show();
         ModelService.clone({modelId: model.name}, $scope.modelRequest, function (result) {
           loadingRequest.hide();
-          SweetAlert.swal('Success!', 'Clone model successfully', 'success');
+          MessageBox.successNotify('Clone model successfully');
           location.reload();
         }, function (e) {
           loadingRequest.hide();

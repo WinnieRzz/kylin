@@ -18,6 +18,7 @@
 
 package org.apache.kylin.storage.hbase.steps;
 
+import java.io.Serializable;
 import java.nio.ByteBuffer;
 import java.util.List;
 
@@ -26,13 +27,13 @@ import org.apache.hadoop.io.Text;
 import org.apache.kylin.common.util.Bytes;
 import org.apache.kylin.cube.model.CubeDesc;
 import org.apache.kylin.cube.model.HBaseColumnDesc;
-import org.apache.kylin.measure.BufferedMeasureEncoder;
+import org.apache.kylin.measure.BufferedMeasureCodec;
 import org.apache.kylin.metadata.model.MeasureDesc;
 
 /**
  * @author George Song (ysong1)
  */
-public class KeyValueCreator {
+public class KeyValueCreator implements Serializable {
     byte[] cfBytes;
     byte[] qBytes;
     long timestamp;
@@ -40,7 +41,7 @@ public class KeyValueCreator {
     int[] refIndex;
     MeasureDesc[] refMeasures;
 
-    BufferedMeasureEncoder codec;
+    BufferedMeasureCodec codec;
     Object[] colValues;
 
     public boolean isFullCopy;
@@ -54,7 +55,7 @@ public class KeyValueCreator {
         refIndex = colDesc.getMeasureIndex();
         refMeasures = colDesc.getMeasures();
 
-        codec = new BufferedMeasureEncoder(refMeasures);
+        codec = new BufferedMeasureCodec(refMeasures);
         colValues = new Object[refMeasures.length];
 
         isFullCopy = true;

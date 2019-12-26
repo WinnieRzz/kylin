@@ -21,14 +21,14 @@ package org.apache.kylin.engine.mr.steps;
 import java.io.File;
 import java.io.IOException;
 import java.util.Map;
-import java.util.UUID;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
-import org.apache.kylin.engine.mr.HadoopUtil;
-import org.apache.kylin.engine.mr.common.CuboidStatsUtil;
-import org.apache.kylin.measure.hllc.HyperLogLogPlusCounter;
+import org.apache.kylin.common.util.HadoopUtil;
+import org.apache.kylin.common.util.RandomUtil;
+import org.apache.kylin.engine.mr.common.CubeStatsWriter;
+import org.apache.kylin.measure.hllc.HLLCounter;
 import org.junit.Test;
 
 import com.google.common.collect.Maps;
@@ -42,14 +42,14 @@ public class FactDistinctColumnsReducerTest {
 
         final Configuration conf = HadoopUtil.getCurrentConfiguration();
         File tmp = File.createTempFile("cuboidstatistics", "");
-        final Path outputPath = new Path(tmp.getParent().toString() + File.separator + UUID.randomUUID().toString());
+        final Path outputPath = new Path(tmp.getParent().toString() + File.separator + RandomUtil.randomUUID().toString());
         if (!FileSystem.getLocal(conf).exists(outputPath)) {
             //            FileSystem.getLocal(conf).create(outputPath);
         }
 
         System.out.println(outputPath);
-        Map<Long, HyperLogLogPlusCounter> cuboidHLLMap = Maps.newHashMap();
-        CuboidStatsUtil.writeCuboidStatistics(conf, outputPath, cuboidHLLMap, 100);
+        Map<Long, HLLCounter> cuboidHLLMap = Maps.newHashMap();
+        CubeStatsWriter.writeCuboidStatistics(conf, outputPath, cuboidHLLMap, 100);
         FileSystem.getLocal(conf).delete(outputPath, true);
 
     }

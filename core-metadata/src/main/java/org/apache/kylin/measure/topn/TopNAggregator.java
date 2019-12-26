@@ -45,6 +45,16 @@ public class TopNAggregator extends MeasureAggregator<TopNCounter<ByteArray>> {
     }
 
     @Override
+    public TopNCounter<ByteArray> aggregate(TopNCounter<ByteArray> value1, TopNCounter<ByteArray> value2) {
+        int thisCapacity = value1.getCapacity();
+        TopNCounter<ByteArray> aggregated = new TopNCounter<>(thisCapacity * 2);
+        aggregated.merge(value1);
+        aggregated.merge(value2);
+        aggregated.retain(thisCapacity);
+        return aggregated;
+    }
+
+    @Override
     public TopNCounter<ByteArray> getState() {
         sum.retain(capacity);
         return sum;
@@ -53,6 +63,14 @@ public class TopNAggregator extends MeasureAggregator<TopNCounter<ByteArray>> {
     @Override
     public int getMemBytesEstimate() {
         return 8 * capacity / 4;
+    }
+
+    public TopNAggregator copy() {
+        TopNAggregator result = new TopNAggregator();
+        result.capacity = this.capacity;
+        TopNCounter<ByteArray> cpCounter = sum.copy();
+        result.sum = cpCounter;
+        return result;
     }
 
 }

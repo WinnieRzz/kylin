@@ -27,16 +27,31 @@ import org.apache.kylin.measure.MeasureAggregator;
 @SuppressWarnings("serial")
 public class BigDecimalSumAggregator extends MeasureAggregator<BigDecimal> {
 
-    BigDecimal sum = new BigDecimal(0);
+    BigDecimal sum = null;
 
     @Override
     public void reset() {
-        sum = new BigDecimal(0);
+        sum = null;
     }
 
     @Override
     public void aggregate(BigDecimal value) {
+        if (value == null)
+            return;
+        if (sum == null) {
+            sum = new BigDecimal(0);
+        }
         sum = sum.add(value);
+    }
+
+    @Override
+    public BigDecimal aggregate(BigDecimal value1, BigDecimal value2) {
+        if (value1 == null) {
+            return value2;
+        } else if (value2 == null) {
+            return value1;
+        }
+        return value1.add(value2);
     }
 
     @Override

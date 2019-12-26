@@ -23,16 +23,16 @@ import java.io.File;
 import java.util.ArrayList;
 import java.util.List;
 
+import java.util.Locale;
 import org.apache.commons.cli.Option;
 import org.apache.commons.cli.OptionBuilder;
-import org.apache.commons.io.FileUtils;
 import org.apache.kylin.common.KylinConfig;
 import org.apache.kylin.common.util.OptionsHelper;
 import org.apache.kylin.cube.CubeDescManager;
 import org.apache.kylin.cube.CubeManager;
-import org.apache.kylin.metadata.MetadataManager;
+import org.apache.kylin.metadata.model.DataModelManager;
 import org.apache.kylin.metadata.project.ProjectManager;
-import org.apache.kylin.tool.util.ToolUtil;
+import org.apache.kylin.common.util.ToolUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -60,14 +60,12 @@ public class KylinLogExtractor extends AbstractInfoExtractor {
     private void beforeExtract() {
         // reload metadata before extract diagnosis info
         logger.info("Start to reload metadata from diagnosis.");
+        
+        config.clearManagers();
 
-        CubeManager.clearCache();
         CubeManager.getInstance(config);
-        CubeDescManager.clearCache();
         CubeDescManager.getInstance(config);
-        MetadataManager.clearCache();
-        MetadataManager.getInstance(config);
-        ProjectManager.clearCache();
+        DataModelManager.getInstance(config);
         ProjectManager.getInstance(config);
     }
 
@@ -75,7 +73,7 @@ public class KylinLogExtractor extends AbstractInfoExtractor {
     protected void executeExtract(OptionsHelper optionsHelper, File exportDir) throws Exception {
         beforeExtract();
 
-        int logPeriod = optionsHelper.hasOption(OPTION_LOG_PERIOD) ? Integer.valueOf(optionsHelper.getOptionValue(OPTION_LOG_PERIOD)) : DEFAULT_LOG_PERIOD;
+        int logPeriod = optionsHelper.hasOption(OPTION_LOG_PERIOD) ? Integer.parseInt(optionsHelper.getOptionValue(OPTION_LOG_PERIOD)) : DEFAULT_LOG_PERIOD;
 
         if (logPeriod < 1) {
             logger.warn("No logs to extract.");
@@ -110,7 +108,9 @@ public class KylinLogExtractor extends AbstractInfoExtractor {
         for (File logFile : requiredLogFiles) {
             logger.info("Log file:" + logFile.getAbsolutePath());
             if (logFile.exists()) {
-                FileUtils.copyFileToDirectory(logFile, exportDir);
+                String cmd = String.format(Locale.ROOT, "cp %s %s", logFile.getAbsolutePath(), exportDir
+                    .getAbsolutePath());
+                config.getCliCommandExecutor().execute(cmd);
             }
         }
     }

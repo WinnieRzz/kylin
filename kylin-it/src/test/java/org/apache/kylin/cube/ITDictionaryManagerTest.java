@@ -19,14 +19,19 @@
 package org.apache.kylin.cube;
 
 import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.assertNotEquals;
 
+import java.io.BufferedWriter;
 import java.io.File;
+import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.OutputStreamWriter;
 import java.io.PrintWriter;
+import java.nio.charset.StandardCharsets;
 import java.util.Set;
 
 import org.apache.kylin.common.util.Dictionary;
+import org.apache.kylin.common.util.HadoopUtil;
 import org.apache.kylin.common.util.JsonUtil;
 import org.apache.kylin.common.util.LocalFileMetadataTestCase;
 import org.apache.kylin.cube.model.CubeDesc;
@@ -34,9 +39,8 @@ import org.apache.kylin.dict.DictionaryInfo;
 import org.apache.kylin.dict.DictionaryManager;
 import org.apache.kylin.dict.DistinctColumnValuesProvider;
 import org.apache.kylin.engine.mr.DFSFileTable;
-import org.apache.kylin.engine.mr.HadoopUtil;
 import org.apache.kylin.metadata.model.TblColRef;
-import org.apache.kylin.source.ReadableTable;
+import org.apache.kylin.source.IReadableTable;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
@@ -60,22 +64,26 @@ public class ITDictionaryManagerTest extends LocalFileMetadataTestCase {
     @Test
     public void basic() throws Exception {
         dictMgr = DictionaryManager.getInstance(getTestConfig());
-        CubeDesc cubeDesc = CubeDescManager.getInstance(getTestConfig()).getCubeDesc("test_kylin_cube_without_slr_desc");
+        CubeDesc cubeDesc = CubeDescManager.getInstance(getTestConfig())
+                .getCubeDesc("test_kylin_cube_without_slr_desc");
         TblColRef col = cubeDesc.findColumnRef("DEFAULT.TEST_KYLIN_FACT", "LSTG_FORMAT_NAME");
 
         MockDistinctColumnValuesProvider mockupData = new MockDistinctColumnValuesProvider("A", "B", "C");
 
-        DictionaryInfo info1 = dictMgr.buildDictionary(cubeDesc.getModel(), col, mockupData);
+        DictionaryInfo info1 = dictMgr.buildDictionary(col, mockupData.getDistinctValuesFor(col));
         System.out.println(JsonUtil.writeValueAsIndentString(info1));
 
-        DictionaryInfo info2 = dictMgr.buildDictionary(cubeDesc.getModel(), col, mockupData);
+        Thread.sleep(1000);
+
+        DictionaryInfo info2 = dictMgr.buildDictionary(col, mockupData.getDistinctValuesFor(col));
         System.out.println(JsonUtil.writeValueAsIndentString(info2));
 
         // test check duplicate
-        assertTrue(info1.getUuid() == info2.getUuid());
-        assertTrue(info1 == dictMgr.getDictionaryInfo(info1.getResourcePath()));
-        assertTrue(info2 == dictMgr.getDictionaryInfo(info2.getResourcePath()));
-        assertTrue(info1.getDictionaryObject() == info2.getDictionaryObject());
+        assertEquals(info1.getUuid(), info2.getUuid());
+        assertEquals(info1.getResourcePath(), info1.getResourcePath());
+        assertNotEquals(info1.getLastModified(), info2.getLastModified());
+        assertNotEquals(info1, info2);
+        assertEquals(info1.getDictionaryObject(), info2.getDictionaryObject());
 
         // verify dictionary entries
         @SuppressWarnings("unchecked")
@@ -89,7 +97,7 @@ public class ITDictionaryManagerTest extends LocalFileMetadataTestCase {
 
         // test empty dictionary
         MockDistinctColumnValuesProvider mockupEmpty = new MockDistinctColumnValuesProvider();
-        DictionaryInfo info3 = dictMgr.buildDictionary(cubeDesc.getModel(), col, mockupEmpty);
+        DictionaryInfo info3 = dictMgr.buildDictionary(col, mockupEmpty.getDistinctValuesFor(col));
         System.out.println(JsonUtil.writeValueAsIndentString(info3));
         assertEquals(0, info3.getCardinality());
         assertEquals(0, info3.getDictionaryObject().getSize());
@@ -105,7 +113,8 @@ public class ITDictionaryManagerTest extends LocalFileMetadataTestCase {
 
         public MockDistinctColumnValuesProvider(String... values) throws IOException {
             File tmpFile = File.createTempFile("MockDistinctColumnValuesProvider", ".txt");
-            PrintWriter out = new PrintWriter(tmpFile);
+            PrintWriter out = new PrintWriter(
+                    new BufferedWriter(new OutputStreamWriter(new FileOutputStream(tmpFile), StandardCharsets.UTF_8)));
 
             set = Sets.newTreeSet();
             for (String value : values) {
@@ -119,7 +128,7 @@ public class ITDictionaryManagerTest extends LocalFileMetadataTestCase {
         }
 
         @Override
-        public ReadableTable getDistinctValuesFor(TblColRef col) {
+        public IReadableTable getDistinctValuesFor(TblColRef col) {
             return new DFSFileTable(tmpFilePath, -1);
         }
 

@@ -32,24 +32,95 @@ import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
-import java.io.UnsupportedEncodingException;
+import java.lang.reflect.Field;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Iterator;
+import java.util.List;
+import java.util.NoSuchElementException;
 import java.util.Random;
 import java.util.TreeSet;
+import java.util.concurrent.TimeUnit;
 
+import org.apache.commons.lang3.RandomStringUtils;
+import org.apache.kylin.common.util.Dictionary;
+import org.apache.kylin.common.util.LocalFileMetadataTestCase;
+import org.junit.AfterClass;
+import org.junit.Assert;
+import org.junit.BeforeClass;
 import org.junit.Test;
 
+import com.google.common.base.Stopwatch;
+import com.google.common.collect.Sets;
+
 public class TrieDictionaryTest {
+    @BeforeClass
+    public static void setUp() {
+        LocalFileMetadataTestCase.staticCreateTestMetadata();
+    }
+
+    @AfterClass
+    public static void after() {
+        LocalFileMetadataTestCase.staticCleanupTestMetadata();
+    }
 
     public static void main(String[] args) throws Exception {
-        InputStream is = new FileInputStream("src/test/resources/dict/dw_category_grouping_names.dat");
-        // InputStream is =
-        // Util.getPackageResourceAsStream(TrieDictionaryTest.class,
-        // "eng_com.dic");
-        ArrayList<String> str = loadStrings(is);
-        benchmarkStringDictionary(str);
+        int count = (int) (Integer.MAX_VALUE * 0.8 / 64);
+        benchmarkStringDictionary(new RandomStrings(count));
+    }
+
+    private static class RandomStrings implements Iterable<String> {
+        final private int size;
+
+        public RandomStrings(int size) {
+            this.size = size;
+            System.out.println("size = " + size);
+        }
+
+        @Override
+        public Iterator<String> iterator() {
+            return new Iterator<String>() {
+                Random rand = new Random(1000);
+                int i = 0;
+
+                @Override
+                public boolean hasNext() {
+                    return i < size;
+                }
+
+                @Override
+                public String next() {
+                    if (hasNext() == false)
+                        throw new NoSuchElementException();
+
+                    i++;
+                    if (i % 1000000 == 0)
+                        System.out.println(i);
+
+                    return nextString();
+                }
+
+                private String nextString() {
+                    StringBuffer buf = new StringBuffer();
+                    for (int i = 0; i < 64; i++) {
+                        int v = rand.nextInt(16);
+                        char c;
+                        if (v >= 0 && v <= 9)
+                            c = (char) ('0' + v);
+                        else
+                            c = (char) ('a' + v - 10);
+                        buf.append(c);
+                    }
+                    return buf.toString();
+                }
+
+                @Override
+                public void remove() {
+                    throw new UnsupportedOperationException();
+                }
+            };
+        }
     }
 
     @Test
@@ -159,6 +230,31 @@ public class TrieDictionaryTest {
     }
 
     @Test
+    public void testEnumeratorValues() throws Exception {
+        testEnumeratorValues("src/test/resources/dict/english-words.80 (scowl-2015.05.18).txt");
+        testEnumeratorValues("src/test/resources/dict/dw_category_grouping_names.dat");
+    }
+
+    private void testEnumeratorValues(String file) throws Exception {
+        InputStream is = new FileInputStream(file);
+        ArrayList<String> str = loadStrings(is);
+        TrieDictionaryBuilder<String> b = newDictBuilder(str);
+        TrieDictionary<String> dict = b.build(0);
+        System.out.println("Dictionary size for file " + file + " is " + dict.getSize());
+
+        Stopwatch sw = new Stopwatch();
+        sw.start();
+        List<String> values1 = dict.enumeratorValuesByParent();
+        System.out.println("By iterating id visit the time cost " + sw.elapsed(TimeUnit.MILLISECONDS) + " ms");
+        sw.reset();
+        sw.start();
+        List<String> values2 = dict.enumeratorValues();
+        System.out.println("By pre-order visit the time cost " + sw.elapsed(TimeUnit.MILLISECONDS) + " ms");
+        sw.stop();
+        assertEquals(Sets.newHashSet(values1), Sets.newHashSet(values2));
+    }
+
+    @Test
     public void englishWordsTest() throws Exception {
         InputStream is = new FileInputStream("src/test/resources/dict/english-words.80 (scowl-2015.05.18).txt");
         ArrayList<String> str = loadStrings(is);
@@ -172,7 +268,17 @@ public class TrieDictionaryTest {
         testStringDictionary(str, null);
     }
 
-    private static void benchmarkStringDictionary(ArrayList<String> str) throws UnsupportedEncodingException {
+    @Test
+    public void testAllNullValue() {
+        ArrayList<String> strs = new ArrayList<String>();
+        strs.add("");
+        TrieDictionaryBuilder<String> builder = newDictBuilder(strs);
+        TrieDictionary<String> dict = builder.build(0);
+        assertEquals(1, dict.getSize());
+        assertEquals(0, dict.getIdFromValue(""));
+    }
+
+    private static void benchmarkStringDictionary(Iterable<String> str) throws IOException {
         TrieDictionaryBuilder<String> b = newDictBuilder(str);
         b.stats().print();
         TrieDictionary<String> dict = b.build(0);
@@ -205,13 +311,14 @@ public class TrieDictionaryTest {
         // following jvm options may help
         // -XX:CompileThreshold=1500
         // -XX:+PrintCompilation
+        System.out.println("Benchmark awaitig...");
         benchmark("Warm up", dict, set, map, strArray, array);
         benchmark("Benchmark", dict, set, map, strArray, array);
     }
 
     private static int benchmark(String msg, TrieDictionary<String> dict, TreeSet<String> set, HashMap<String, Integer> map, String[] strArray, byte[][] array) {
         int n = set.size();
-        int times = 10 * 1000 * 1000 / n; // run 10 million lookups
+        int times = Math.max(10 * 1000 * 1000 / n, 1); // run 10 million lookups
         int keep = 0; // make sure JIT don't OPT OUT function calls under test
         byte[] valueBytes = new byte[dict.getSizeOfValue()];
         long start;
@@ -232,7 +339,7 @@ public class TrieDictionaryTest {
         start = System.currentTimeMillis();
         for (int i = 0; i < times; i++) {
             for (int j = 0; j < n; j++) {
-                keep |= dict.getIdFromValueBytes(array[j], 0, array[j].length);
+                keep |= dict.getIdFromValueBytesWithoutCache(array[j], 0, array[j].length, 0);
             }
         }
         long timeValueToIdByDict = System.currentTimeMillis() - start;
@@ -254,7 +361,7 @@ public class TrieDictionaryTest {
         start = System.currentTimeMillis();
         for (int i = 0; i < times; i++) {
             for (int j = 0; j < n; j++) {
-                keep |= dict.getValueBytesFromId(j, valueBytes, 0);
+                keep |= dict.getValueBytesFromIdWithoutCache(j).length;
             }
         }
         long timeIdToValueByDict = System.currentTimeMillis() - start;
@@ -300,9 +407,6 @@ public class TrieDictionaryTest {
         // test null value
         int nullId = dict.getIdFromValue(null);
         assertNull(dict.getValueFromId(nullId));
-        int nullId2 = dict.getIdFromValueBytes(null, 0, 0);
-        assertEquals(dict.getValueBytesFromId(nullId2, null, 0), -1);
-        assertEquals(nullId, nullId2);
     }
 
     private static TrieDictionary<String> testSerialize(TrieDictionary<String> dict) {
@@ -322,7 +426,7 @@ public class TrieDictionaryTest {
         }
     }
 
-    private static TrieDictionaryBuilder<String> newDictBuilder(ArrayList<String> str) {
+    private static TrieDictionaryBuilder<String> newDictBuilder(Iterable<String> str) {
         TrieDictionaryBuilder<String> b = new TrieDictionaryBuilder<String>(new StringBytesConverter());
         for (String s : str)
             b.addValue(s);
@@ -351,17 +455,107 @@ public class TrieDictionaryTest {
         String longPrefix = "0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789" + "0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789";
 
         TrieDictionaryBuilder<String> b = new TrieDictionaryBuilder<String>(new StringBytesConverter());
-        String v1 = longPrefix + "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz";
-        String v2 = longPrefix + "xyz";
-
+        String v1 = longPrefix + "xyz";
         b.addValue(v1);
-        b.addValue(v2);
+
+        String strLen200 = "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghid";
+        b.addValue(strLen200);
+
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < 25; i++) {
+            sb.append(strLen200);
+        }
+        String strLen5000 = sb.toString();
+        b.addValue(strLen5000);
         TrieDictionary<String> dict = b.build(0);
         dict.dump(System.out);
+
+        sb.setLength(0);
+        for (int j = 0; j < 7; j++) {
+            sb.append(strLen5000);
+        }
+        String strLen35000 = sb.toString();
+        b.addValue(strLen35000);
+        Exception ex = null;
+        try {
+            b.build(0);
+        } catch (Exception e) {
+            ex = e;
+        }
+        Assert.assertNotNull(ex);
     }
 
     @Test
     public void testRounding() {
         // see NumberDictionaryTest.testRounding();
+    }
+
+    @Test
+    public void testCache() throws Exception {
+        List<String> words = new ArrayList<>();
+
+        TrieDictionaryBuilder<String> b = new TrieDictionaryBuilder<String>(new StringBytesConverter());
+        int size = 50;
+        for (int i = 0; i < size; i++) {
+            String word = gen();
+            words.add(word);
+            b.addValue(word);
+        }
+        TrieDictionary<String> dict = b.build(0);
+
+        // test getValueFromId, miss cache
+        String[] wordsInDict = new String[size];
+        for (int i = 0; i < size; i++) {
+            String word = dict.getValueFromId(i);
+            wordsInDict[i] = word;
+            Assert.assertTrue(words.contains(word));
+        }
+        Assert.assertEquals(size, getField(dict, "cacheMissCount"));
+        Assert.assertEquals(0, getField(dict, "cacheHitCount"));
+        dict.printlnStatistics();
+
+        // test containsValue, invoke getIdFromValue, miss cache and then hit cache
+        for (int i = 0; i < size; i++) {
+            Assert.assertTrue(dict.containsValue(wordsInDict[i]));
+            Assert.assertTrue(dict.containsValue(wordsInDict[i]));
+        }
+        Assert.assertEquals(getField(dict, "cacheHitCount"), size);
+        Assert.assertEquals(getField(dict, "cacheMissCount"), size);
+        dict.printlnStatistics();
+
+        // test getValueFromId, hit cache
+        for (int i = 0; i < size; i++) {
+            String word = dict.getValueFromId(i);
+            Assert.assertEquals(wordsInDict[i], word);
+        }
+        Assert.assertEquals(getField(dict, "cacheHitCount"), size);
+        dict.printlnStatistics();
+
+        // test getValueByteFromId, hit cache
+        for (int i = 0; i < size; i++) {
+            byte[] word = dict.getValueByteFromId(i);
+            Assert.assertArrayEquals(wordsInDict[i].getBytes(StandardCharsets.UTF_8), word);
+        }
+        Assert.assertEquals(getField(dict, "cacheHitCount"), size);
+        dict.printlnStatistics();
+
+        // disable cache, miss cache
+        dict.disableCache();
+        for (int i = 0; i < size; i++) {
+            byte[] word = dict.getValueByteFromId(i);
+            Assert.assertArrayEquals(wordsInDict[i].getBytes(StandardCharsets.UTF_8), word);
+        }
+        Assert.assertEquals(0, getField(dict, "cacheHitCount"));
+        dict.printlnStatistics();
+    }
+
+    private static int getField(TrieDictionary<String> dict, String field) throws Exception {
+        Field f = Dictionary.class.getDeclaredField(field);
+        f.setAccessible(true);
+        return (int) f.get(dict);
+    }
+
+    private static String gen() {
+        return RandomStringUtils.randomAlphanumeric(10);
     }
 }

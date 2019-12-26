@@ -18,17 +18,18 @@
 
 package org.apache.kylin.engine.mr.steps;
 
+import java.util.Locale;
 import org.apache.commons.cli.Options;
-import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.io.Text;
 import org.apache.hadoop.mapreduce.Job;
-import org.apache.hadoop.mapreduce.lib.input.SequenceFileInputFormat;
-import org.apache.hadoop.mapreduce.lib.output.FileOutputFormat;
-import org.apache.hadoop.mapreduce.lib.output.SequenceFileOutputFormat;
 import org.apache.kylin.common.KylinConfig;
 import org.apache.kylin.cube.CubeInstance;
 import org.apache.kylin.cube.CubeManager;
+import org.apache.kylin.cube.CubeSegment;
+import org.apache.kylin.engine.mr.IMROutput2;
+import org.apache.kylin.engine.mr.MRUtil;
 import org.apache.kylin.engine.mr.common.BatchConstants;
+import org.apache.kylin.metadata.model.Segments;
 
 public class MergeCuboidJob extends CuboidJob {
 
@@ -39,16 +40,19 @@ public class MergeCuboidJob extends CuboidJob {
         try {
             options.addOption(OPTION_JOB_NAME);
             options.addOption(OPTION_CUBE_NAME);
-            options.addOption(OPTION_SEGMENT_NAME);
+            options.addOption(OPTION_SEGMENT_ID);
             options.addOption(OPTION_INPUT_PATH);
             options.addOption(OPTION_OUTPUT_PATH);
             parseOptions(options, args);
 
-            String cubeName = getOptionValue(OPTION_CUBE_NAME).toUpperCase();
-            String segmentName = getOptionValue(OPTION_SEGMENT_NAME).toUpperCase();
+            String input = getOptionValue(OPTION_INPUT_PATH);
+            String output = getOptionValue(OPTION_OUTPUT_PATH);
+            String cubeName = getOptionValue(OPTION_CUBE_NAME).toUpperCase(Locale.ROOT);
+            String segmentID = getOptionValue(OPTION_SEGMENT_ID);
 
             CubeManager cubeMgr = CubeManager.getInstance(KylinConfig.getInstanceFromEnv());
             CubeInstance cube = cubeMgr.getCube(cubeName);
+            CubeSegment cubeSeg = cube.getSegmentById(segmentID);
 
             // start job
             String jobName = getOptionValue(OPTION_JOB_NAME);
@@ -57,39 +61,34 @@ public class MergeCuboidJob extends CuboidJob {
 
             setJobClasspath(job, cube.getConfig());
 
-            // set inputs
-            addInputDirs(getOptionValue(OPTION_INPUT_PATH), job);
-
-            Path output = new Path(getOptionValue(OPTION_OUTPUT_PATH));
-            FileOutputFormat.setOutputPath(job, output);
+            // add metadata to distributed cache
+            Segments<CubeSegment> allSegs = cube.getMergingSegments(cubeSeg);
+            allSegs.add(cubeSeg);
+            attachSegmentsMetadataWithDict(allSegs, job.getConfiguration());
 
             // Mapper
-            job.setInputFormatClass(SequenceFileInputFormat.class);
             job.setMapperClass(MergeCuboidMapper.class);
             job.setMapOutputKeyClass(Text.class);
             job.setMapOutputValueClass(Text.class);
 
+            // Reducer
             job.setReducerClass(CuboidReducer.class);
-            job.setOutputFormatClass(SequenceFileOutputFormat.class);
             job.setOutputKeyClass(Text.class);
             job.setOutputValueClass(Text.class);
 
+            // set inputs
+            IMROutput2.IMRMergeOutputFormat outputFormat = MRUtil.getBatchMergeOutputSide2(cubeSeg).getOutputFormat();
+            outputFormat.configureJobInput(job, input);
+            addInputDirs(input, job);
+
+            // set output
+            outputFormat.configureJobOutput(job, output, cubeSeg);
+
             // set job configuration
             job.getConfiguration().set(BatchConstants.CFG_CUBE_NAME, cubeName);
-            job.getConfiguration().set(BatchConstants.CFG_CUBE_SEGMENT_NAME, segmentName);
-
-            // add metadata to distributed cache
-            attachKylinPropsAndMetadata(cube, job.getConfiguration());
-
-            setReduceTaskNum(job, cube.getDescriptor(), 0);
-
-            this.deletePath(job.getConfiguration(), output);
+            job.getConfiguration().set(BatchConstants.CFG_CUBE_SEGMENT_ID, segmentID);
 
             return waitForCompletion(job);
-        } catch (Exception e) {
-            logger.error("error in MergeCuboidJob", e);
-            printUsage(options);
-            throw e;
         } finally {
             if (job != null)
                 cleanupTempConfFile(job.getConfiguration());

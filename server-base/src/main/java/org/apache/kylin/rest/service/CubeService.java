@@ -6,9 +6,9 @@
  * to you under the Apache License, Version 2.0 (the
  * "License"); you may not use this file except in compliance
  * with the License.  You may obtain a copy of the License at
- * 
+ *
  *     http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -24,57 +24,89 @@ import java.util.Collections;
 import java.util.Date;
 import java.util.EnumSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
-import java.util.WeakHashMap;
 
-import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.hbase.client.HTable;
+import org.apache.commons.collections.CollectionUtils;
+import org.apache.commons.lang.StringUtils;
+import org.apache.hadoop.hbase.client.HBaseAdmin;
 import org.apache.kylin.common.KylinConfig;
+import org.apache.kylin.common.persistence.RootPersistentEntity;
+import org.apache.kylin.common.util.CliCommandExecutor;
+import org.apache.kylin.common.util.HadoopUtil;
 import org.apache.kylin.common.util.Pair;
 import org.apache.kylin.cube.CubeInstance;
 import org.apache.kylin.cube.CubeManager;
 import org.apache.kylin.cube.CubeSegment;
 import org.apache.kylin.cube.CubeUpdate;
+import org.apache.kylin.cube.cuboid.Cuboid;
 import org.apache.kylin.cube.cuboid.CuboidCLI;
+import org.apache.kylin.cube.cuboid.CuboidScheduler;
 import org.apache.kylin.cube.model.CubeDesc;
 import org.apache.kylin.engine.EngineFactory;
 import org.apache.kylin.engine.mr.CubingJob;
-import org.apache.kylin.engine.mr.HadoopUtil;
-import org.apache.kylin.engine.mr.common.HadoopShellExecutable;
-import org.apache.kylin.engine.mr.common.MapReduceExecutable;
+import org.apache.kylin.engine.mr.JobBuilderSupport;
+import org.apache.kylin.engine.mr.common.CuboidRecommenderUtil;
+import org.apache.kylin.job.JobInstance;
+import org.apache.kylin.job.common.PatternedLogger;
+import org.apache.kylin.job.constant.JobStatusEnum;
+import org.apache.kylin.job.constant.JobTimeFilterEnum;
 import org.apache.kylin.job.exception.JobException;
 import org.apache.kylin.job.execution.DefaultChainedExecutable;
 import org.apache.kylin.job.execution.ExecutableState;
-import org.apache.kylin.metadata.MetadataConstants;
-import org.apache.kylin.metadata.MetadataManager;
+import org.apache.kylin.measure.percentile.PercentileMeasureType;
+import org.apache.kylin.metadata.cachesync.Broadcaster;
+import org.apache.kylin.metadata.draft.Draft;
+import org.apache.kylin.metadata.model.DataModelDesc;
+import org.apache.kylin.metadata.model.FunctionDesc;
+import org.apache.kylin.metadata.model.IStorageAware;
+import org.apache.kylin.metadata.model.MeasureDesc;
+import org.apache.kylin.metadata.model.SegmentRange;
 import org.apache.kylin.metadata.model.SegmentStatusEnum;
+import org.apache.kylin.metadata.model.Segments;
 import org.apache.kylin.metadata.model.TableDesc;
 import org.apache.kylin.metadata.project.ProjectInstance;
 import org.apache.kylin.metadata.project.ProjectManager;
 import org.apache.kylin.metadata.project.RealizationEntry;
 import org.apache.kylin.metadata.realization.RealizationStatusEnum;
 import org.apache.kylin.metadata.realization.RealizationType;
+import org.apache.kylin.metrics.property.QueryCubePropertyEnum;
 import org.apache.kylin.rest.constant.Constant;
+import org.apache.kylin.rest.exception.BadRequestException;
+import org.apache.kylin.rest.exception.ForbiddenException;
 import org.apache.kylin.rest.exception.InternalErrorException;
+import org.apache.kylin.rest.msg.Message;
+import org.apache.kylin.rest.msg.MsgPicker;
 import org.apache.kylin.rest.request.MetricsRequest;
+import org.apache.kylin.rest.response.CubeInstanceResponse;
+import org.apache.kylin.rest.response.CuboidTreeResponse;
+import org.apache.kylin.rest.response.CuboidTreeResponse.NodeInfo;
 import org.apache.kylin.rest.response.HBaseResponse;
 import org.apache.kylin.rest.response.MetricsResponse;
-import org.apache.kylin.rest.security.AclPermission;
-import org.apache.kylin.source.hive.HiveSourceTableLoader;
-import org.apache.kylin.source.hive.cardinality.HiveColumnCardinalityJob;
-import org.apache.kylin.source.hive.cardinality.HiveColumnCardinalityUpdateJob;
+import org.apache.kylin.rest.util.AclEvaluate;
+import org.apache.kylin.rest.util.ValidateUtil;
 import org.apache.kylin.storage.hbase.HBaseConnection;
-import org.apache.kylin.storage.hbase.util.HBaseRegionSizeCalculator;
+import org.apache.kylin.storage.hbase.util.StorageCleanUtil;
+import org.apache.kylin.storage.hybrid.HybridInstance;
+import org.apache.kylin.stream.coordinator.StreamMetadataStoreFactory;
+import org.apache.kylin.stream.coordinator.client.CoordinatorClient;
+import org.apache.kylin.stream.coordinator.client.CoordinatorClientFactory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.InitializingBean;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.security.access.prepost.PostFilter;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.security.access.AccessDeniedException;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Component;
 
+import com.google.common.base.Preconditions;
+import com.google.common.cache.Cache;
+import com.google.common.cache.CacheBuilder;
 import com.google.common.collect.Lists;
+import com.google.common.collect.Maps;
 
 /**
  * Stateless & lightweight service facade of cube management functions.
@@ -82,34 +114,65 @@ import com.google.common.collect.Lists;
  * @author yangli9
  */
 @Component("cubeMgmtService")
-public class CubeService extends BasicService {
-    private static final String DESC_SUFFIX = "_desc";
+public class CubeService extends BasicService implements InitializingBean {
 
     private static final Logger logger = LoggerFactory.getLogger(CubeService.class);
 
-    private WeakHashMap<String, HBaseResponse> htableInfoCache = new WeakHashMap<>();
+    protected Cache<String, HBaseResponse> htableInfoCache = CacheBuilder.newBuilder().build();
 
     @Autowired
-    private AccessService accessService;
+    @Qualifier("projectService")
+    private ProjectService projectService;
 
-    @PostFilter(Constant.ACCESS_POST_FILTER_READ)
-    public List<CubeInstance> listAllCubes(final String cubeName, final String projectName, final String modelName) {
+    @Autowired
+    @Qualifier("jobService")
+    private JobService jobService;
+
+    @Autowired
+    @Qualifier("modelMgmtService")
+    private ModelService modelService;
+
+    @Autowired
+    @Qualifier("queryService")
+    private QueryService queryService;
+
+    @Autowired
+    private AclEvaluate aclEvaluate;
+
+    @Autowired
+    private HybridService hybridService;
+
+    public boolean isCubeNameVaildate(final String cubeName) {
+        if (StringUtils.isEmpty(cubeName) || !ValidateUtil.isAlphanumericUnderscore(cubeName)) {
+            return false;
+        }
+        for (CubeInstance cubeInstance : getCubeManager().listAllCubes()) {
+            if (cubeName.equalsIgnoreCase(cubeInstance.getName())) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    public List<CubeInstance> listAllCubes(final String cubeName, final String projectName, final String modelName,
+            boolean exactMatch) {
         List<CubeInstance> cubeInstances = null;
-        ProjectInstance project = (null != projectName) ? getProjectManager().getProject(projectName) : null;
 
-        if (null == project) {
+        if (null == projectName) {
             cubeInstances = getCubeManager().listAllCubes();
+            aclEvaluate.checkIsGlobalAdmin();
         } else {
             cubeInstances = listAllCubes(projectName);
+            aclEvaluate.checkProjectReadPermission(projectName);
         }
 
         List<CubeInstance> filterModelCubes = new ArrayList<CubeInstance>();
 
         if (modelName != null) {
             for (CubeInstance cubeInstance : cubeInstances) {
-                boolean isCubeMatch = cubeInstance.getDescriptor().getModelName().toLowerCase().equals(modelName.toLowerCase());
-                if (isCubeMatch) {
-                    filterModelCubes.add(cubeInstance);
+                boolean isModelMatch = cubeInstance.getDescriptor().getModelName().equalsIgnoreCase(modelName);
+                if (isModelMatch) {
+                    filterModelCubes.add(0, cubeInstance);
                 }
             }
         } else {
@@ -118,39 +181,24 @@ public class CubeService extends BasicService {
 
         List<CubeInstance> filterCubes = new ArrayList<CubeInstance>();
         for (CubeInstance cubeInstance : filterModelCubes) {
-            boolean isCubeMatch = (null == cubeName) || cubeInstance.getName().toLowerCase().contains(cubeName.toLowerCase());
+            boolean isCubeMatch = (null == cubeName)
+                    || (!exactMatch && cubeInstance.getName().toLowerCase(Locale.ROOT)
+                            .contains(cubeName.toLowerCase(Locale.ROOT)))
+                    || (exactMatch && cubeInstance.getName().toLowerCase(Locale.ROOT)
+                            .equals(cubeName.toLowerCase(Locale.ROOT)));
 
             if (isCubeMatch) {
                 filterCubes.add(cubeInstance);
             }
         }
+        // sort the cube list by create time in descending order
+        filterCubes.sort((o1, o2) -> Long.compare(o2.getCreateTimeUTC(), o1.getCreateTimeUTC()));
 
         return filterCubes;
     }
 
-    @PostFilter(Constant.ACCESS_POST_FILTER_READ)
-    public List<CubeInstance> getCubes(final String cubeName, final String projectName, final String modelName, final Integer limit, final Integer offset) {
-
-        List<CubeInstance> cubes;
-        cubes = listAllCubes(cubeName, projectName, modelName);
-
-        int climit = (null == limit) ? cubes.size() : limit;
-        int coffset = (null == offset) ? 0 : offset;
-
-        if (cubes.size() <= coffset) {
-            return Collections.emptyList();
-        }
-
-        if ((cubes.size() - coffset) < climit) {
-            return cubes.subList(coffset, cubes.size());
-        }
-
-        return cubes.subList(coffset, coffset + climit);
-    }
-
-    @PreAuthorize(Constant.ACCESS_HAS_ROLE_ADMIN + " or hasPermission(#cube, 'ADMINISTRATION') or hasPermission(#cube, 'MANAGEMENT')")
     public CubeInstance updateCubeCost(CubeInstance cube, int cost) throws IOException {
-
+        aclEvaluate.checkProjectWritePermission(cube);
         if (cube.getCost() == cost) {
             // Do nothing
             return cube;
@@ -160,19 +208,22 @@ public class CubeService extends BasicService {
         String owner = SecurityContextHolder.getContext().getAuthentication().getName();
         cube.setOwner(owner);
 
-        CubeUpdate cubeBuilder = new CubeUpdate(cube).setOwner(owner).setCost(cost);
-
-        return getCubeManager().updateCube(cubeBuilder);
+        CubeUpdate update = new CubeUpdate(cube.latestCopyForWrite()).setOwner(owner).setCost(cost);
+        return getCubeManager().updateCube(update);
     }
 
-    @PreAuthorize(Constant.ACCESS_HAS_ROLE_ADMIN + " or " + Constant.ACCESS_HAS_ROLE_MODELER)
-    public CubeInstance createCubeAndDesc(String cubeName, String projectName, CubeDesc desc) throws IOException {
+    @PreAuthorize(Constant.ACCESS_HAS_ROLE_ADMIN
+            + " or hasPermission(#project, 'ADMINISTRATION') or hasPermission(#project, 'MANAGEMENT')")
+    public CubeInstance createCubeAndDesc(ProjectInstance project, CubeDesc desc) throws IOException {
+        Message msg = MsgPicker.getMsg();
+        String cubeName = desc.getName();
+
         if (getCubeManager().getCube(cubeName) != null) {
-            throw new InternalErrorException("The cube named " + cubeName + " already exists");
+            throw new BadRequestException(String.format(Locale.ROOT, msg.getCUBE_ALREADY_EXIST(), cubeName));
         }
 
         if (getCubeDescManager().getCubeDesc(desc.getName()) != null) {
-            throw new InternalErrorException("The cube desc named " + desc.getName() + " already exists");
+            throw new BadRequestException(String.format(Locale.ROOT, msg.getCUBE_DESC_ALREADY_EXIST(), desc.getName()));
         }
 
         String owner = SecurityContextHolder.getContext().getAuthentication().getName();
@@ -181,25 +232,14 @@ public class CubeService extends BasicService {
 
         createdDesc = getCubeDescManager().createCubeDesc(desc);
 
-        if (!createdDesc.getError().isEmpty()) {
-            getCubeDescManager().removeCubeDesc(createdDesc);
-            throw new InternalErrorException(createdDesc.getError().get(0));
+        if (createdDesc.isBroken()) {
+            throw new BadRequestException(createdDesc.getErrorsAsString());
         }
 
-        try {
-            int cuboidCount = CuboidCLI.simulateCuboidGeneration(createdDesc, false);
-            logger.info("New cube " + cubeName + " has " + cuboidCount + " cuboids");
-        } catch (Exception e) {
-            getCubeDescManager().removeCubeDesc(createdDesc);
-            throw new InternalErrorException("Failed to deal with the request.", e);
-        }
+        int cuboidCount = CuboidCLI.simulateCuboidGeneration(createdDesc, false);
+        logger.info("New cube " + cubeName + " has " + cuboidCount + " cuboids");
 
-        createdCube = getCubeManager().createCube(cubeName, projectName, createdDesc, owner);
-        accessService.init(createdCube, AclPermission.ADMINISTRATION);
-
-        ProjectInstance project = getProjectManager().getProject(projectName);
-        accessService.inherit(createdCube, project);
-
+        createdCube = getCubeManager().createCube(cubeName, project.getName(), createdDesc, owner);
         return createdCube;
     }
 
@@ -222,7 +262,7 @@ public class CubeService extends BasicService {
         return result;
     }
 
-    private boolean isCubeInProject(String projectName, CubeInstance target) {
+    protected boolean isCubeInProject(String projectName, CubeInstance target) {
         ProjectManager projectManager = getProjectManager();
         ProjectInstance project = projectManager.getProject(projectName);
         if (project == null) {
@@ -232,7 +272,8 @@ public class CubeService extends BasicService {
             if (projectDataModel.getType() == RealizationType.CUBE) {
                 CubeInstance cube = getCubeManager().getCube(projectDataModel.getRealization());
                 if (cube == null) {
-                    logger.error("Project " + projectName + " contains realization " + projectDataModel.getRealization() + " which is not found by CubeManager");
+                    logger.error("Project " + projectName + " contains realization " + projectDataModel.getRealization()
+                            + " which is not found by CubeManager");
                     continue;
                 }
                 if (cube.equals(target)) {
@@ -243,42 +284,44 @@ public class CubeService extends BasicService {
         return false;
     }
 
-    @PreAuthorize(Constant.ACCESS_HAS_ROLE_ADMIN + " or hasPermission(#cube, 'ADMINISTRATION') or hasPermission(#cube, 'MANAGEMENT')")
-    public CubeDesc updateCubeAndDesc(CubeInstance cube, CubeDesc desc, String newProjectName, boolean forceUpdate) throws IOException, JobException {
+    public CubeDesc updateCubeAndDesc(CubeInstance cube, CubeDesc desc, String newProjectName, boolean forceUpdate)
+            throws IOException {
+        aclEvaluate.checkProjectWritePermission(cube);
+        Message msg = MsgPicker.getMsg();
 
-        final List<CubingJob> cubingJobs = listAllCubingJobs(cube.getName(), null, EnumSet.of(ExecutableState.READY, ExecutableState.RUNNING));
+        final List<CubingJob> cubingJobs = jobService.listJobsByRealizationName(cube.getName(), null,
+                EnumSet.of(ExecutableState.READY, ExecutableState.RUNNING));
         if (!cubingJobs.isEmpty()) {
-            throw new JobException("Cube schema shouldn't be changed with running job.");
+            throw new BadRequestException(String.format(Locale.ROOT, msg.getDISCARD_JOB_FIRST(), cube.getName()));
         }
 
-        try {
-            //double check again
-            if (!forceUpdate && !cube.getDescriptor().consistentWith(desc)) {
-                throw new IllegalStateException("cube's desc is not consistent with the new desc");
-            }
-
-            CubeDesc updatedCubeDesc = getCubeDescManager().updateCubeDesc(desc);
-            int cuboidCount = CuboidCLI.simulateCuboidGeneration(updatedCubeDesc, false);
-            logger.info("Updated cube " + cube.getName() + " has " + cuboidCount + " cuboids");
-
-            ProjectManager projectManager = getProjectManager();
-            if (!isCubeInProject(newProjectName, cube)) {
-                String owner = SecurityContextHolder.getContext().getAuthentication().getName();
-                ProjectInstance newProject = projectManager.moveRealizationToProject(RealizationType.CUBE, cube.getName(), newProjectName, owner);
-                accessService.inherit(cube, newProject);
-            }
-
-            return updatedCubeDesc;
-        } catch (IOException e) {
-            throw new InternalErrorException("Failed to deal with the request.", e);
+        //double check again
+        if (!forceUpdate && !cube.getDescriptor().consistentWith(desc)) {
+            throw new BadRequestException(String.format(Locale.ROOT, msg.getINCONSISTENT_CUBE_DESC(), desc.getName()));
         }
+
+        CubeDesc updatedCubeDesc = getCubeDescManager().updateCubeDesc(desc);
+        int cuboidCount = CuboidCLI.simulateCuboidGeneration(updatedCubeDesc, false);
+        logger.info("Updated cube " + cube.getName() + " has " + cuboidCount + " cuboids");
+
+        ProjectManager projectManager = getProjectManager();
+        if (!isCubeInProject(newProjectName, cube)) {
+            String owner = SecurityContextHolder.getContext().getAuthentication().getName();
+            ProjectInstance newProject = projectManager.moveRealizationToProject(RealizationType.CUBE, cube.getName(),
+                    newProjectName, owner);
+        }
+
+        return updatedCubeDesc;
     }
 
-    @PreAuthorize(Constant.ACCESS_HAS_ROLE_ADMIN + " or hasPermission(#cube, 'ADMINISTRATION') or hasPermission(#cube, 'MANAGEMENT')")
-    public void deleteCube(CubeInstance cube) throws IOException, JobException {
-        final List<CubingJob> cubingJobs = listAllCubingJobs(cube.getName(), null, EnumSet.of(ExecutableState.READY, ExecutableState.RUNNING));
+    public void deleteCube(CubeInstance cube) throws IOException {
+        aclEvaluate.checkProjectWritePermission(cube);
+        Message msg = MsgPicker.getMsg();
+
+        final List<CubingJob> cubingJobs = jobService.listJobsByRealizationName(cube.getName(), null,
+                EnumSet.of(ExecutableState.READY, ExecutableState.RUNNING, ExecutableState.ERROR));
         if (!cubingJobs.isEmpty()) {
-            throw new JobException("The cube " + cube.getName() + " has running job, please discard it and try again.");
+            throw new BadRequestException(String.format(Locale.ROOT, msg.getDISCARD_JOB_FIRST(), cube.getName()));
         }
 
         try {
@@ -288,32 +331,41 @@ public class CubeService extends BasicService {
             //ignore the exception
         }
 
-        int cubeNum = getCubeManager().getCubesByDesc(cube.getDescriptor().getName()).size();
-        getCubeManager().dropCube(cube.getName(), cubeNum == 1);//only delete cube desc when no other cube is using it
-        accessService.clean(cube, true);
-    }
+        // remove from hybrid definition
+        ProjectInstance projectInstance = cube.getProjectInstance();
+        List<RealizationEntry> hybridRealizationEntries = projectInstance.getRealizationEntries(RealizationType.HYBRID);
 
-    public boolean isCubeDescFreeEditable(CubeDesc cd) {
-        List<CubeInstance> cubes = getCubeManager().getCubesByDesc(cd.getName());
-        for (CubeInstance cube : cubes) {
-            if (cube.getSegments().size() != 0) {
-                logger.debug("cube '" + cube.getName() + " has " + cube.getSegments().size() + " segments, couldn't edit cube desc.");
-                return false;
+        if (hybridRealizationEntries != null) {
+            for (RealizationEntry entry : hybridRealizationEntries) {
+                HybridInstance instance = getHybridManager().getHybridInstance(entry.getRealization());
+                List<RealizationEntry> cubeRealizationEntries = instance.getRealizationEntries();
+
+                boolean needUpdateHybrid = false;
+                for (RealizationEntry cubeRealizationEntry : cubeRealizationEntries) {
+                    if (cube.getName().equals(cubeRealizationEntry.getRealization())) {
+                        needUpdateHybrid = true;
+                        cubeRealizationEntries.remove(cubeRealizationEntry);
+                        break;
+                    }
+                }
+
+                if (needUpdateHybrid) {
+                    String[] cubeNames = new String[cubeRealizationEntries.size()];
+                    for (int i = 0; i < cubeRealizationEntries.size(); i++) {
+                        cubeNames[i] = cubeRealizationEntries.get(i).getRealization();
+                    }
+                    hybridService.updateHybridCubeNoCheck(instance.getName(), projectInstance.getName(),
+                            cube.getModel().getName(), cubeNames);
+                }
             }
         }
-        return true;
-    }
 
-    public static String getCubeDescNameFromCube(String cubeName) {
-        return cubeName + DESC_SUFFIX;
-    }
+        List<CubeSegment> toRemoveSegs = cube.getSegments();
 
-    public static String getCubeNameFromDesc(String descName) {
-        if (descName.toLowerCase().endsWith(DESC_SUFFIX)) {
-            return descName.substring(0, descName.toLowerCase().indexOf(DESC_SUFFIX));
-        } else {
-            return descName;
-        }
+        int cubeNum = getCubeManager().getCubesByDesc(cube.getDescriptor().getName()).size();
+        getCubeManager().dropCube(cube.getName(), cubeNum == 1);//only delete cube desc when no other cube is using it
+
+        cleanSegmentStorage(toRemoveSegs);
     }
 
     /**
@@ -324,22 +376,26 @@ public class CubeService extends BasicService {
      * @throws IOException
      * @throws JobException
      */
-    @PreAuthorize(Constant.ACCESS_HAS_ROLE_ADMIN + " or hasPermission(#cube, 'ADMINISTRATION') or hasPermission(#cube, 'OPERATION') or hasPermission(#cube, 'MANAGEMENT')")
-    public CubeInstance purgeCube(CubeInstance cube) throws IOException, JobException {
+    public CubeInstance purgeCube(CubeInstance cube) throws IOException {
+        aclEvaluate.checkProjectOperationPermission(cube);
+        Message msg = MsgPicker.getMsg();
 
         String cubeName = cube.getName();
+
+        final List<CubingJob> cubingJobs = jobService.listJobsByRealizationName(cubeName, null, EnumSet
+                .of(ExecutableState.READY, ExecutableState.RUNNING, ExecutableState.ERROR, ExecutableState.STOPPED));
+        if (!cubingJobs.isEmpty()) {
+            throw new BadRequestException(String.format(Locale.ROOT, msg.getDISCARD_JOB_FIRST(), cubeName));
+        }
+
         RealizationStatusEnum ostatus = cube.getStatus();
         if (null != ostatus && !RealizationStatusEnum.DISABLED.equals(ostatus)) {
-            throw new InternalErrorException("Only disabled cube can be purged, status of " + cubeName + " is " + ostatus);
+            throw new BadRequestException(
+                    String.format(Locale.ROOT, msg.getPURGE_NOT_DISABLED_CUBE(), cubeName, ostatus));
         }
 
-        try {
-            this.releaseAllSegments(cube);
-            return cube;
-        } catch (IOException e) {
-            throw e;
-        }
-
+        this.releaseAllSegments(cube);
+        return cube;
     }
 
     /**
@@ -349,25 +405,69 @@ public class CubeService extends BasicService {
      * @throws IOException
      * @throws JobException
      */
-    @PreAuthorize(Constant.ACCESS_HAS_ROLE_ADMIN + " or hasPermission(#cube, 'ADMINISTRATION') or hasPermission(#cube, 'OPERATION') or hasPermission(#cube, 'MANAGEMENT')")
-    public CubeInstance disableCube(CubeInstance cube) throws IOException, JobException {
+    public CubeInstance disableCube(CubeInstance cube) throws IOException {
+        aclEvaluate.checkProjectWritePermission(cube);
+        Message msg = MsgPicker.getMsg();
 
         String cubeName = cube.getName();
 
         RealizationStatusEnum ostatus = cube.getStatus();
         if (null != ostatus && !RealizationStatusEnum.READY.equals(ostatus)) {
-            throw new InternalErrorException("Only ready cube can be disabled, status of " + cubeName + " is " + ostatus);
+            throw new BadRequestException(
+                    String.format(Locale.ROOT, msg.getDISABLE_NOT_READY_CUBE(), cubeName, ostatus));
         }
 
-        cube.setStatus(RealizationStatusEnum.DISABLED);
+        boolean isStreamingCube = cube.getDescriptor().isStreamingCube();
 
+        boolean cubeStatusUpdated = false;
         try {
-            CubeUpdate cubeBuilder = new CubeUpdate(cube);
-            cubeBuilder.setStatus(RealizationStatusEnum.DISABLED);
-            return getCubeManager().updateCube(cubeBuilder);
-        } catch (IOException e) {
+            CubeInstance cubeInstance = getCubeManager().updateCubeStatus(cube, RealizationStatusEnum.DISABLED);
+            cubeStatusUpdated = true;
+            // for streaming cube.
+            if (isStreamingCube) {
+                //drop not ready segments
+                CubeSegment[] buildingSegments = new CubeSegment[cubeInstance.getBuildingSegments().size()];
+                Segments segments = cubeInstance.getBuildingSegments();
+                if (!CollectionUtils.isEmpty(segments)) {
+                    for (int i = 0; i < segments.size(); i++) {
+                        buildingSegments[i] = (CubeSegment) segments.get(i);
+                    }
+                    getCubeManager().dropOptmizingSegments(cubeInstance, buildingSegments);
+                }
+                //unAssign cube
+                getStreamingCoordinator().unAssignCube(cubeName);
+            }
+            return cubeInstance;
+        } catch (Exception e) {
             cube.setStatus(ostatus);
+            // roll back if cube status updated
+            if (cubeStatusUpdated) {
+                logger.info("roll back cube status to:{}", ostatus);
+                getCubeManager().updateCubeStatus(cube, ostatus);
+            }
             throw e;
+        }
+    }
+
+    public void checkEnableCubeCondition(CubeInstance cube) {
+        aclEvaluate.checkProjectWritePermission(cube);
+        Message msg = MsgPicker.getMsg();
+        String cubeName = cube.getName();
+
+        RealizationStatusEnum ostatus = cube.getStatus();
+
+        if (!cube.getStatus().equals(RealizationStatusEnum.DISABLED)) {
+            throw new BadRequestException(
+                    String.format(Locale.ROOT, msg.getENABLE_NOT_DISABLED_CUBE(), cubeName, ostatus));
+        }
+
+        if (cube.getSegments(SegmentStatusEnum.READY).size() == 0 && !cube.getDescriptor().isStreamingCube()) {
+            throw new BadRequestException(String.format(Locale.ROOT, msg.getNO_READY_SEGMENT(), cubeName));
+        }
+
+        if (!cube.getDescriptor().checkSignature()) {
+            throw new BadRequestException(
+                    String.format(Locale.ROOT, msg.getINCONSISTENT_CUBE_DESC_SIGNATURE(), cube.getDescriptor()));
         }
     }
 
@@ -376,37 +476,31 @@ public class CubeService extends BasicService {
      *
      * @return
      * @throws IOException
-     * @throws JobException
      */
-    @PreAuthorize(Constant.ACCESS_HAS_ROLE_ADMIN + " or hasPermission(#cube, 'ADMINISTRATION') or hasPermission(#cube, 'OPERATION')  or hasPermission(#cube, 'MANAGEMENT')")
-    public CubeInstance enableCube(CubeInstance cube) throws IOException, JobException {
-        String cubeName = cube.getName();
-
+    public CubeInstance enableCube(CubeInstance cube) throws IOException {
+        boolean cubeStatusUpdated = false;
         RealizationStatusEnum ostatus = cube.getStatus();
-        if (!cube.getStatus().equals(RealizationStatusEnum.DISABLED)) {
-            throw new InternalErrorException("Only disabled cube can be enabled, status of " + cubeName + " is " + ostatus);
-        }
-
-        if (cube.getSegments(SegmentStatusEnum.READY).size() == 0) {
-            throw new InternalErrorException("Cube " + cubeName + " dosen't contain any READY segment");
-        }
-
-        final List<CubingJob> cubingJobs = listAllCubingJobs(cube.getName(), null, EnumSet.of(ExecutableState.READY, ExecutableState.RUNNING));
-        if (!cubingJobs.isEmpty()) {
-            throw new JobException("Enable is not allowed with a running job.");
-        }
-        if (!cube.getDescriptor().checkSignature()) {
-            throw new IllegalStateException("Inconsistent cube desc signature for " + cube.getDescriptor());
-        }
-
         try {
-            CubeUpdate cubeBuilder = new CubeUpdate(cube);
-            cubeBuilder.setStatus(RealizationStatusEnum.READY);
-            return getCubeManager().updateCube(cubeBuilder);
-        } catch (IOException e) {
+            CubeInstance cubeInstance = getCubeManager().updateCubeStatus(cube, RealizationStatusEnum.READY);
+            cubeStatusUpdated = true;
+            // for streaming cube.
+            if (cube.getDescriptor().isStreamingCube()) {
+                getStreamingCoordinator().assignCube(cube.getName());
+            }
+            return cubeInstance;
+        } catch (Exception e) {
             cube.setStatus(ostatus);
+            // roll back if cube status updated
+            if (cubeStatusUpdated) {
+                logger.info("roll back cube status to:{}", ostatus);
+                getCubeManager().updateCubeStatus(cube, ostatus);
+            }
             throw e;
         }
+    }
+
+    private CoordinatorClient getStreamingCoordinator() {
+        return CoordinatorClientFactory.createCoordinatorClient(StreamMetadataStoreFactory.getStreamMetaDataStore());
     }
 
     public MetricsResponse calculateMetrics(MetricsRequest request) {
@@ -426,7 +520,8 @@ public class CubeService extends BasicService {
             }
         }
 
-        metrics.increase("aveStorage", (metrics.get("totalCubes") == 0) ? 0 : metrics.get("totalStorage") / metrics.get("totalCubes"));
+        metrics.increase("aveStorage",
+                (metrics.get("totalCubes") == 0) ? 0 : metrics.get("totalStorage") / metrics.get("totalCubes"));
 
         return metrics;
     }
@@ -437,130 +532,134 @@ public class CubeService extends BasicService {
      *
      * @param tableName The table name.
      * @return The HBaseResponse object contains table size, region count. null
-     * if error happens.
+     * if error happens
      * @throws IOException Exception when HTable resource is not closed correctly.
      */
-    public HBaseResponse getHTableInfo(String tableName) throws IOException {
-        if (htableInfoCache.containsKey(tableName)) {
-            return htableInfoCache.get(tableName);
+    public HBaseResponse getHTableInfo(String cubeName, String tableName) throws IOException {
+        String key = cubeName + "/" + tableName;
+        HBaseResponse hr = htableInfoCache.getIfPresent(key);
+        if (null != hr) {
+            return hr;
         }
 
-        Configuration hconf = HBaseConnection.getCurrentHBaseConfiguration();
-        HTable table = null;
-        HBaseResponse hr = null;
-        long tableSize = 0;
-        int regionCount = 0;
+        hr = new HBaseResponse();
+        CubeInstance cube = CubeManager.getInstance(getConfig()).getCube(cubeName);
+        if (cube.getStorageType() == IStorageAware.ID_HBASE || cube.getStorageType() == IStorageAware.ID_SHARDED_HBASE || cube.getStorageType() == IStorageAware.ID_REALTIME_AND_HBASE) {
+            try {
+                logger.debug("Loading HTable info " + cubeName + ", " + tableName);
 
-        try {
-            table = new HTable(hconf, tableName);
-
-            HBaseRegionSizeCalculator cal = new HBaseRegionSizeCalculator(table);
-            Map<byte[], Long> sizeMap = cal.getRegionSizeMap();
-
-            for (long s : sizeMap.values()) {
-                tableSize += s;
-            }
-
-            regionCount = sizeMap.size();
-
-            // Set response.
-            hr = new HBaseResponse();
-            hr.setTableSize(tableSize);
-            hr.setRegionCount(regionCount);
-        } finally {
-            if (null != table) {
-                table.close();
+                // use reflection to isolate NoClassDef errors when HBase is not available
+                hr = (HBaseResponse) Class.forName("org.apache.kylin.rest.service.HBaseInfoUtil")//
+                        .getMethod("getHBaseInfo", new Class[] { String.class, KylinConfig.class })//
+                        .invoke(null, tableName, this.getConfig());
+            } catch (Throwable e) {
+                throw new IOException(e);
             }
         }
 
-        htableInfoCache.put(tableName, hr);
-
+        htableInfoCache.put(key, hr);
         return hr;
     }
 
-    /**
-     * Generate cardinality for table This will trigger a hadoop job
-     * The result will be merged into table exd info
-     *
-     * @param tableName
-     */
-    @PreAuthorize(Constant.ACCESS_HAS_ROLE_MODELER + " or " + Constant.ACCESS_HAS_ROLE_ADMIN)
-    public void calculateCardinality(String tableName, String submitter) {
-        String[] dbTableName = HadoopUtil.parseHiveTableName(tableName);
-        tableName = dbTableName[0] + "." + dbTableName[1];
-        TableDesc table = getMetadataManager().getTableDesc(tableName);
-        final Map<String, String> tableExd = getMetadataManager().getTableDescExd(tableName);
-        if (tableExd == null || table == null) {
-            IllegalArgumentException e = new IllegalArgumentException("Cannot find table descirptor " + tableName);
-            logger.error("Cannot find table descirptor " + tableName, e);
-            throw e;
-        }
-
-        DefaultChainedExecutable job = new DefaultChainedExecutable();
-        job.setName("Hive Column Cardinality calculation for table '" + tableName + "'");
-        job.setSubmitter(submitter);
-
-        String outPath = HiveColumnCardinalityJob.OUTPUT_PATH + "/" + tableName;
-        String param = "-table " + tableName + " -output " + outPath;
-
-        MapReduceExecutable step1 = new MapReduceExecutable();
-
-        step1.setMapReduceJobClass(HiveColumnCardinalityJob.class);
-        step1.setMapReduceParams(param);
-
-        job.addTask(step1);
-
-        HadoopShellExecutable step2 = new HadoopShellExecutable();
-
-        step2.setJobClass(HiveColumnCardinalityUpdateJob.class);
-        step2.setJobParams(param);
-        job.addTask(step2);
-
-        getExecutableManager().addJob(job);
-    }
-
-    @PreAuthorize(Constant.ACCESS_HAS_ROLE_ADMIN + " or hasPermission(#cube, 'ADMINISTRATION') or hasPermission(#cube, 'OPERATION')  or hasPermission(#cube, 'MANAGEMENT')")
     public void updateCubeNotifyList(CubeInstance cube, List<String> notifyList) throws IOException {
+        aclEvaluate.checkProjectOperationPermission(cube);
         CubeDesc desc = cube.getDescriptor();
         desc.setNotifyList(notifyList);
         getCubeDescManager().updateCubeDesc(desc);
     }
 
-    @PreAuthorize(Constant.ACCESS_HAS_ROLE_ADMIN + " or hasPermission(#cube, 'ADMINISTRATION') or hasPermission(#cube, 'OPERATION')  or hasPermission(#cube, 'MANAGEMENT')")
-    public CubeInstance rebuildLookupSnapshot(CubeInstance cube, String segmentName, String lookupTable) throws IOException {
+    public CubeInstance rebuildLookupSnapshot(CubeInstance cube, String segmentName, String lookupTable)
+            throws IOException {
+        aclEvaluate.checkProjectOperationPermission(cube);
+        Message msg = MsgPicker.getMsg();
+        TableDesc tableDesc = getTableManager().getTableDesc(lookupTable, cube.getProject());
+        if (tableDesc.isView()) {
+            throw new BadRequestException(
+                    String.format(Locale.ROOT, msg.getREBUILD_SNAPSHOT_OF_VIEW(), tableDesc.getName()));
+        }
         CubeSegment seg = cube.getSegment(segmentName, SegmentStatusEnum.READY);
-        getCubeManager().buildSnapshotTable(seg, lookupTable);
+        getCubeManager().buildSnapshotTable(seg, lookupTable, null);
 
         return cube;
     }
 
-    @PreAuthorize(Constant.ACCESS_HAS_ROLE_ADMIN + " or hasPermission(#cube, 'ADMINISTRATION') or hasPermission(#cube, 'OPERATION')  or hasPermission(#cube, 'MANAGEMENT')")
     public CubeInstance deleteSegment(CubeInstance cube, String segmentName) throws IOException {
+        aclEvaluate.checkProjectOperationPermission(cube);
+        Message msg = MsgPicker.getMsg();
 
-        if (!segmentName.equals(cube.getSegments().get(0).getName()) && !segmentName.equals(cube.getSegments().get(cube.getSegments().size() - 1).getName())) {
-            throw new IllegalArgumentException("Cannot delete segment '" + segmentName + "' as it is neither the first nor the last segment.");
-        }
         CubeSegment toDelete = null;
         for (CubeSegment seg : cube.getSegments()) {
             if (seg.getName().equals(segmentName)) {
                 toDelete = seg;
+                break;
             }
         }
 
-        if (toDelete.getStatus() != SegmentStatusEnum.READY) {
-            throw new IllegalArgumentException("Cannot delete segment '" + segmentName + "' as its status is not READY. Discard the on-going job for it.");
+        if (toDelete == null) {
+            throw new BadRequestException(String.format(Locale.ROOT, msg.getSEG_NOT_FOUND(), segmentName));
         }
 
-        CubeUpdate update = new CubeUpdate(cube);
-        update.setToRemoveSegs(new CubeSegment[] { toDelete });
-        return CubeManager.getInstance(getConfig()).updateCube(update);
+        if (toDelete.getStatus() != SegmentStatusEnum.READY) {
+            if (toDelete.getStatus() == SegmentStatusEnum.NEW) {
+                if (!isOrphonSegment(cube, toDelete.getUuid())) {
+                    throw new BadRequestException(
+                            String.format(Locale.ROOT, msg.getDELETE_NOT_READY_SEG(), segmentName));
+                }
+            } else {
+                throw new BadRequestException(String.format(Locale.ROOT, msg.getDELETE_NOT_READY_SEG(), segmentName));
+            }
+        }
+
+        if (!segmentName.equals(cube.getSegments().get(0).getName())
+                && !segmentName.equals(cube.getSegments().get(cube.getSegments().size() - 1).getName())) {
+            logger.warn(String.format(Locale.ROOT, msg.getDELETE_SEGMENT_CAUSE_GAPS(), cube.getName(), segmentName));
+        }
+
+        CubeInstance cubeInstance = CubeManager.getInstance(getConfig()).updateCubeDropSegments(cube, toDelete);
+
+        cleanSegmentStorage(Collections.singletonList(toDelete));
+
+        return cubeInstance;
     }
 
-    private void releaseAllJobs(CubeInstance cube) {
-        final List<CubingJob> cubingJobs = listAllCubingJobs(cube.getName(), null);
+    // clean segment data in hbase and hdfs
+    private void cleanSegmentStorage(List<CubeSegment> toRemoveSegs) throws IOException {
+        if (!KylinConfig.getInstanceFromEnv().cleanStorageAfterDelOperation()) {
+            return;
+        }
+
+        if (toRemoveSegs != null && !toRemoveSegs.isEmpty()) {
+            List<String> toDropHTables = Lists.newArrayListWithCapacity(toRemoveSegs.size());
+            List<String> toDelHDFSPaths = Lists.newArrayListWithCapacity(toRemoveSegs.size());
+            for (CubeSegment seg : toRemoveSegs) {
+                toDropHTables.add(seg.getStorageLocationIdentifier());
+                toDelHDFSPaths.add(JobBuilderSupport.getJobWorkingDir(seg.getConfig().getHdfsWorkingDirectory(), seg.getLastBuildJobID()));
+            }
+
+            StorageCleanUtil.dropHTables(new HBaseAdmin(HBaseConnection.getCurrentHBaseConfiguration()), toDropHTables);
+            StorageCleanUtil.deleteHDFSPath(HadoopUtil.getWorkingFileSystem(), toDelHDFSPaths);
+        }
+    }
+
+    public boolean isOrphonSegment(CubeInstance cube, String segId) {
+        List<JobInstance> jobInstances = jobService.searchJobsByCubeName(
+                cube.getName(), cube.getProject(), Lists.newArrayList(JobStatusEnum.NEW, JobStatusEnum.PENDING,
+                        JobStatusEnum.RUNNING, JobStatusEnum.ERROR, JobStatusEnum.STOPPED),
+                JobTimeFilterEnum.ALL, JobService.JobSearchMode.CUBING_ONLY);
+        for (JobInstance jobInstance : jobInstances) {
+            // if there are segment related jobs, can not delete this segment.
+            if (segId.equals(jobInstance.getRelatedSegment())) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    protected void releaseAllJobs(CubeInstance cube) {
+        final List<CubingJob> cubingJobs = jobService.listJobsByRealizationName(cube.getName(), null);
         for (CubingJob cubingJob : cubingJobs) {
             final ExecutableState status = cubingJob.getStatus();
-            if (status != ExecutableState.SUCCEED && status != ExecutableState.STOPPED && status != ExecutableState.DISCARDED) {
+            if (status != ExecutableState.SUCCEED && status != ExecutableState.DISCARDED) {
                 getExecutableManager().discardJob(cubingJob.getId());
             }
         }
@@ -572,60 +671,31 @@ public class CubeService extends BasicService {
      * @throws IOException
      * @throws JobException
      */
-    private void releaseAllSegments(CubeInstance cube) throws IOException, JobException {
+    private void releaseAllSegments(CubeInstance cube) throws IOException {
         releaseAllJobs(cube);
 
-        CubeUpdate update = new CubeUpdate(cube);
-        update.setToRemoveSegs(cube.getSegments().toArray(new CubeSegment[cube.getSegments().size()]));
-        CubeManager.getInstance(getConfig()).updateCube(update);
-    }
+        List<CubeSegment> toRemoveSegs = cube.getSegments();
 
-    @PreAuthorize(Constant.ACCESS_HAS_ROLE_MODELER + " or " + Constant.ACCESS_HAS_ROLE_ADMIN)
-    public String[] reloadHiveTable(String tables) throws IOException {
-        Set<String> loaded = HiveSourceTableLoader.reloadHiveTables(tables.split(","), getConfig());
-        return (String[]) loaded.toArray(new String[loaded.size()]);
-    }
+        // remove from metadata
+        getCubeManager().clearSegments(cube);
 
-    @PreAuthorize(Constant.ACCESS_HAS_ROLE_ADMIN)
-    public void unLoadHiveTable(String tableName) throws IOException {
-        String[] dbTableName = HadoopUtil.parseHiveTableName(tableName);
-        tableName = dbTableName[0] + "." + dbTableName[1];
-        HiveSourceTableLoader.unLoadHiveTable(tableName.toUpperCase());
-    }
-
-    @PreAuthorize(Constant.ACCESS_HAS_ROLE_ADMIN)
-    public void syncTableToProject(String[] tables, String project) throws IOException {
-        getProjectManager().addTableDescToProject(tables, project);
-    }
-
-    @PreAuthorize(Constant.ACCESS_HAS_ROLE_ADMIN)
-    public void removeTableFromProject(String tableName, String projectName) throws IOException {
-        String[] dbTableName = HadoopUtil.parseHiveTableName(tableName);
-        tableName = dbTableName[0] + "." + dbTableName[1];
-        getProjectManager().removeTableDescFromProject(tableName, projectName);
-    }
-
-    @PreAuthorize(Constant.ACCESS_HAS_ROLE_MODELER + " or " + Constant.ACCESS_HAS_ROLE_ADMIN)
-    public void calculateCardinalityIfNotPresent(String[] tables, String submitter) throws IOException {
-        MetadataManager metaMgr = getMetadataManager();
-        for (String table : tables) {
-            Map<String, String> exdMap = metaMgr.getTableDescExd(table);
-            if (exdMap == null || !exdMap.containsKey(MetadataConstants.TABLE_EXD_CARDINALITY)) {
-                calculateCardinality(table, submitter);
-            }
-        }
+        cleanSegmentStorage(toRemoveSegs);
     }
 
     public void updateOnNewSegmentReady(String cubeName) {
-        logger.debug("on updateOnNewSegmentReady: " + cubeName);
         final KylinConfig kylinConfig = KylinConfig.getInstanceFromEnv();
         String serverMode = kylinConfig.getServerMode();
-        logger.debug("server mode: " + serverMode);
-        if (Constant.SERVER_MODE_JOB.equals(serverMode.toLowerCase()) || Constant.SERVER_MODE_ALL.equals(serverMode.toLowerCase())) {
-            keepCubeRetention(cubeName);
-            mergeCubeSegment(cubeName);
+        if (Constant.SERVER_MODE_JOB.equals(serverMode.toLowerCase(Locale.ROOT))
+                || Constant.SERVER_MODE_ALL.equals(serverMode.toLowerCase(Locale.ROOT))) {
+            CubeInstance cube = getCubeManager().getCube(cubeName);
+            if (cube != null) {
+                CubeSegment seg = cube.getLatestBuiltSegment();
+                if (seg != null && seg.getStatus() == SegmentStatusEnum.READY) {
+                    keepCubeRetention(cubeName);
+                    mergeCubeSegment(cubeName);
+                }
+            }
         }
-
     }
 
     private void keepCubeRetention(String cubeName) {
@@ -642,18 +712,19 @@ public class CubeService extends BasicService {
                 return;
 
             List<CubeSegment> toRemoveSegs = Lists.newArrayList();
-            long tail = readySegs.get(readySegs.size() - 1).getDateRangeEnd();
+            long tail = readySegs.get(readySegs.size() - 1).getTSRange().end.v;
             long head = tail - desc.getRetentionRange();
             for (CubeSegment seg : readySegs) {
-                if (seg.getDateRangeEnd() <= head)
-                    toRemoveSegs.add(seg);
+                if (seg.getTSRange().end.v > 0) { // for streaming cube its initial value is 0
+                    if (seg.getTSRange().end.v <= head) {
+                        toRemoveSegs.add(seg);
+                    }
+                }
             }
 
             if (toRemoveSegs.size() > 0) {
-                CubeUpdate cubeBuilder = new CubeUpdate(cube);
-                cubeBuilder.setToRemoveSegs(toRemoveSegs.toArray(new CubeSegment[toRemoveSegs.size()]));
                 try {
-                    this.getCubeManager().updateCube(cubeBuilder);
+                    getCubeManager().updateCubeDropSegments(cube, toRemoveSegs);
                 } catch (IOException e) {
                     logger.error("Failed to remove old segment from cube " + cubeName, e);
                 }
@@ -661,27 +732,386 @@ public class CubeService extends BasicService {
         }
     }
 
-    private void mergeCubeSegment(String cubeName) {
+    public String mergeCubeSegment(String cubeName) {
         CubeInstance cube = getCubeManager().getCube(cubeName);
         if (!cube.needAutoMerge())
-            return;
+            return null;
+
+        if (!cube.isReady()) {
+            logger.info("The cube: {} is disabled", cubeName);
+            return null;
+        }
 
         synchronized (CubeService.class) {
             try {
                 cube = getCubeManager().getCube(cubeName);
-                Pair<Long, Long> offsets = getCubeManager().autoMergeCubeSegments(cube);
-                if (offsets != null) {
-                    CubeSegment newSeg = getCubeManager().mergeSegments(cube, 0, 0, offsets.getFirst(), offsets.getSecond(), true);
-                    logger.debug("Will submit merge job on " + newSeg);
+                SegmentRange offsets = cube.autoMergeCubeSegments();
+                if (offsets != null && !isMergingJobBeenDiscarded(cube, cubeName, cube.getProject(), offsets)) {
+                    CubeSegment newSeg = getCubeManager().mergeSegments(cube, null, offsets, true);
+                    logger.info("Will submit merge job on " + newSeg);
                     DefaultChainedExecutable job = EngineFactory.createBatchMergeJob(newSeg, "SYSTEM");
                     getExecutableManager().addJob(job);
+                    return job.getId();
                 } else {
-                    logger.debug("Not ready for merge on cube " + cubeName);
+                    logger.info("Not ready for merge on cube " + cubeName);
                 }
             } catch (IOException e) {
                 logger.error("Failed to auto merge cube " + cubeName, e);
             }
         }
+        return null;
     }
 
+    //Don't merge the job that has been discarded manually before
+    private boolean isMergingJobBeenDiscarded(CubeInstance cubeInstance, String cubeName, String projectName, SegmentRange offsets) {
+        SegmentRange.TSRange tsRange = new SegmentRange.TSRange((Long) offsets.start.v, (Long) offsets.end.v);
+        String segmentName = CubeSegment.makeSegmentName(tsRange, null, cubeInstance.getModel());
+        final List<CubingJob> jobInstanceList = jobService.listJobsByRealizationName(cubeName, projectName, EnumSet.of(ExecutableState.DISCARDED));
+        for (CubingJob cubingJob : jobInstanceList) {
+            if (cubingJob.getSegmentName().equals(segmentName)) {
+                logger.debug("Merge job {} has been discarded before, will not merge.", segmentName);
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+
+    public void validateCubeDesc(CubeDesc desc, boolean isDraft) {
+        Message msg = MsgPicker.getMsg();
+
+        if (desc == null) {
+            throw new BadRequestException(msg.getINVALID_CUBE_DEFINITION());
+        }
+
+        String cubeName = desc.getName();
+        if (StringUtils.isEmpty(cubeName)) {
+            logger.info("Cube name should not be empty.");
+            throw new BadRequestException(msg.getEMPTY_CUBE_NAME());
+        }
+        if (!ValidateUtil.isAlphanumericUnderscore(cubeName)) {
+            logger.info("Invalid Cube name {}, only letters, numbers and underscore supported.", cubeName);
+            throw new BadRequestException(String.format(Locale.ROOT, msg.getINVALID_CUBE_NAME(), cubeName));
+        }
+
+        if (!isDraft) {
+            DataModelDesc modelDesc = modelService.getDataModelManager().getDataModelDesc(desc.getModelName());
+            if (modelDesc == null) {
+                throw new BadRequestException(
+                        String.format(Locale.ROOT, msg.getMODEL_NOT_FOUND(), desc.getModelName()));
+            }
+
+            if (modelDesc.isDraft()) {
+                logger.info("Cannot use draft model.");
+                throw new BadRequestException(
+                        String.format(Locale.ROOT, msg.getUSE_DRAFT_MODEL(), desc.getModelName()));
+            }
+        }
+    }
+
+    @PreAuthorize(Constant.ACCESS_HAS_ROLE_ADMIN
+            + " or hasPermission(#project, 'ADMINISTRATION') or hasPermission(#project, 'MANAGEMENT')")
+    public CubeDesc saveCube(CubeDesc desc, ProjectInstance project) throws IOException {
+        Message msg = MsgPicker.getMsg();
+
+        desc.setDraft(false);
+        if (desc.getUuid() == null)
+            desc.updateRandomUuid();
+
+        try {
+            createCubeAndDesc(project, desc);
+        } catch (AccessDeniedException accessDeniedException) {
+            throw new ForbiddenException(msg.getUPDATE_CUBE_NO_RIGHT());
+        }
+
+        if (desc.isBroken()) {
+            throw new BadRequestException(desc.getErrorsAsString());
+        }
+
+        return desc;
+    }
+
+    @PreAuthorize(Constant.ACCESS_HAS_ROLE_ADMIN
+            + " or hasPermission(#project, 'ADMINISTRATION') or hasPermission(#project, 'MANAGEMENT')")
+    public void saveDraft(ProjectInstance project, CubeInstance cube, String uuid, RootPersistentEntity... entities)
+            throws IOException {
+        Draft draft = new Draft();
+        draft.setProject(project.getName());
+        draft.setUuid(uuid);
+        draft.setEntities(entities);
+        getDraftManager().save(draft);
+    }
+
+    @PreAuthorize(Constant.ACCESS_HAS_ROLE_ADMIN
+            + " or hasPermission(#project, 'ADMINISTRATION') or hasPermission(#project, 'MANAGEMENT')")
+    public void saveDraft(ProjectInstance project, String uuid, RootPersistentEntity... entities) throws IOException {
+        Draft draft = new Draft();
+        draft.setProject(project.getName());
+        draft.setUuid(uuid);
+        draft.setEntities(entities);
+        getDraftManager().save(draft);
+    }
+
+    public void deleteDraft(Draft draft) throws IOException {
+        aclEvaluate.checkProjectWritePermission(draft.getProject());
+        getDraftManager().delete(draft.getUuid());
+    }
+
+    public CubeDesc updateCube(CubeInstance cube, CubeDesc desc, ProjectInstance project) throws IOException {
+        aclEvaluate.checkProjectWritePermission(cube);
+        Message msg = MsgPicker.getMsg();
+        String projectName = project.getName();
+
+        desc.setDraft(false);
+
+        try {
+            if (cube.getSegments().size() != 0 && !cube.getDescriptor().consistentWith(desc)) {
+                throw new BadRequestException(
+                        String.format(Locale.ROOT, msg.getINCONSISTENT_CUBE_DESC(), desc.getName()));
+            }
+
+            desc = updateCubeAndDesc(cube, desc, projectName, true);
+        } catch (AccessDeniedException accessDeniedException) {
+            throw new ForbiddenException(msg.getUPDATE_CUBE_NO_RIGHT());
+        }
+
+        if (desc.isBroken()) {
+            throw new BadRequestException(desc.getErrorsAsString());
+        }
+
+        return desc;
+    }
+
+    public Draft getCubeDraft(String cubeName, String projectName) throws IOException {
+        for (Draft d : listCubeDrafts(cubeName, null, projectName, true)) {
+            return d;
+        }
+        return null;
+    }
+
+    public List<Draft> listCubeDrafts(String cubeName, String modelName, String project, boolean exactMatch)
+            throws IOException {
+        if (null == project) {
+            aclEvaluate.checkIsGlobalAdmin();
+        } else {
+            aclEvaluate.checkProjectReadPermission(project);
+        }
+        List<Draft> result = new ArrayList<>();
+
+        for (Draft d : getDraftManager().list(project)) {
+            RootPersistentEntity e = d.getEntity();
+            if (e instanceof CubeDesc) {
+                CubeDesc c = (CubeDesc) e;
+                if ((cubeName == null
+                        || (exactMatch
+                                && cubeName.toLowerCase(Locale.ROOT).equals(c.getName().toLowerCase(Locale.ROOT)))
+                        || (!exactMatch
+                                && c.getName().toLowerCase(Locale.ROOT).contains(cubeName.toLowerCase(Locale.ROOT))))
+                        && (modelName == null || modelName.toLowerCase(Locale.ROOT)
+                                .equals(c.getModelName().toLowerCase(Locale.ROOT)))) {
+                    // backward compability for percentile
+                    if (c.getMeasures() != null) {
+                        for (MeasureDesc m : c.getMeasures()) {
+                            FunctionDesc f = m.getFunction();
+                            if (f.getExpression().equals(PercentileMeasureType.FUNC_PERCENTILE)) {
+                                f.setExpression(PercentileMeasureType.FUNC_PERCENTILE_APPROX);
+                            }
+                        }
+                    }
+                    result.add(d);
+                }
+            }
+        }
+        return result;
+    }
+
+    @Override
+    public void afterPropertiesSet() throws Exception {
+        Broadcaster.getInstance(getConfig()).registerStaticListener(new HTableInfoSyncListener(), "cube");
+    }
+
+    private class HTableInfoSyncListener extends Broadcaster.Listener {
+        @Override
+        public void onClearAll(Broadcaster broadcaster) throws IOException {
+            htableInfoCache.invalidateAll();
+        }
+
+        @Override
+        public void onEntityChange(Broadcaster broadcaster, String entity, Broadcaster.Event event, String cacheKey)
+                throws IOException {
+            String cubeName = cacheKey;
+            String keyPrefix = cubeName + "/";
+            for (String k : htableInfoCache.asMap().keySet()) {
+                if (k.startsWith(keyPrefix))
+                    htableInfoCache.invalidate(k);
+            }
+        }
+    }
+
+    public CubeInstanceResponse createCubeInstanceResponse(CubeInstance cube) {
+        return new CubeInstanceResponse(cube, projectService.getProjectOfCube(cube.getName()));
+    }
+
+    public CuboidTreeResponse getCuboidTreeResponse(CuboidScheduler cuboidScheduler, Map<Long, Long> rowCountMap,
+            Map<Long, Long> hitFrequencyMap, Map<Long, Long> queryMatchMap, Set<Long> currentCuboidSet) {
+        long baseCuboidId = cuboidScheduler.getBaseCuboidId();
+        int dimensionCount = Long.bitCount(baseCuboidId);
+
+        // get cube query count total
+        long cubeQueryCount = 0L;
+        if (hitFrequencyMap != null) {
+            for (long queryCount : hitFrequencyMap.values()) {
+                cubeQueryCount += queryCount;
+            }
+        }
+
+        NodeInfo root = generateNodeInfo(baseCuboidId, dimensionCount, cubeQueryCount, rowCountMap, hitFrequencyMap,
+                queryMatchMap, currentCuboidSet);
+
+        List<NodeInfo> nodeQueue = Lists.newLinkedList();
+        nodeQueue.add(root);
+        while (!nodeQueue.isEmpty()) {
+            NodeInfo parentNode = nodeQueue.remove(0);
+            for (long childId : cuboidScheduler.getSpanningCuboid(parentNode.getId())) {
+                NodeInfo childNode = generateNodeInfo(childId, dimensionCount, cubeQueryCount, rowCountMap,
+                        hitFrequencyMap, queryMatchMap, currentCuboidSet);
+                parentNode.addChild(childNode);
+                nodeQueue.add(childNode);
+            }
+        }
+
+        CuboidTreeResponse result = new CuboidTreeResponse();
+        result.setRoot(root);
+        return result;
+    }
+
+    private NodeInfo generateNodeInfo(long cuboidId, int dimensionCount, long cubeQueryCount,
+            Map<Long, Long> rowCountMap, Map<Long, Long> hitFrequencyMap, Map<Long, Long> queryMatchMap,
+            Set<Long> currentCuboidSet) {
+        Long queryCount = hitFrequencyMap == null || hitFrequencyMap.get(cuboidId) == null ? 0L
+                : hitFrequencyMap.get(cuboidId);
+        float queryRate = cubeQueryCount <= 0 ? 0 : queryCount.floatValue() / cubeQueryCount;
+        long queryExactlyMatchCount = queryMatchMap == null || queryMatchMap.get(cuboidId) == null ? 0L
+                : queryMatchMap.get(cuboidId);
+        boolean ifExist = currentCuboidSet.contains(cuboidId);
+        long rowCount = rowCountMap == null ? 0L : rowCountMap.get(cuboidId);
+
+        NodeInfo node = new NodeInfo();
+        node.setId(cuboidId);
+        node.setName(Cuboid.getDisplayName(cuboidId, dimensionCount));
+        node.setQueryCount(queryCount);
+        node.setQueryRate(queryRate);
+        node.setExactlyMatchCount(queryExactlyMatchCount);
+        node.setExisted(ifExist);
+        node.setRowCount(rowCount);
+        return node;
+    }
+
+    /** cube planner services */
+    public Map<Long, Long> getRecommendCuboidStatistics(CubeInstance cube, Map<Long, Long> hitFrequencyMap,
+            Map<Long, Map<Long, Pair<Long, Long>>> rollingUpCountSourceMap) throws IOException {
+        aclEvaluate.checkProjectAdminPermission(cube.getProject());
+        return CuboidRecommenderUtil.getRecommendCuboidList(cube, hitFrequencyMap, rollingUpCountSourceMap);
+    }
+
+    public Map<Long, Long> formatQueryCount(List<List<String>> orgQueryCount) {
+        Map<Long, Long> formattedQueryCount = Maps.newLinkedHashMap();
+        for (List<String> hit : orgQueryCount) {
+            formattedQueryCount.put(Long.parseLong(hit.get(0)), (long) Double.parseDouble(hit.get(1)));
+        }
+        return formattedQueryCount;
+    }
+
+    public Map<Long, Map<Long, Pair<Long, Long>>> formatRollingUpStats(List<List<String>> orgRollingUpCount) {
+        Map<Long, Map<Long, Pair<Long, Long>>> formattedRollingUpStats = Maps.newLinkedHashMap();
+        for (List<String> rollingUp : orgRollingUpCount) {
+            Map<Long, Pair<Long, Long>> childMap = Maps.newLinkedHashMap();
+            Long srcCuboid = Long.parseLong(rollingUp.get(0));
+            Long tgtCuboid = Long.parseLong(rollingUp.get(1));
+            Long rollupCount = (long) Double.parseDouble(rollingUp.get(2));
+            Long returnCount = (long) Double.parseDouble(rollingUp.get(3));
+            childMap.put(tgtCuboid, new Pair<>(rollupCount, returnCount));
+            formattedRollingUpStats.put(srcCuboid, childMap);
+        }
+        return formattedRollingUpStats;
+    }
+
+    public Map<Long, Long> getCuboidHitFrequency(String cubeName, boolean isCuboidSource) {
+        String cuboidColumn = isCuboidSource ? QueryCubePropertyEnum.CUBOID_SOURCE.toString()
+                : QueryCubePropertyEnum.CUBOID_TARGET.toString();
+        String hitMeasure = QueryCubePropertyEnum.WEIGHT_PER_HIT.toString();
+        String table = getMetricsManager().getSystemTableFromSubject(getConfig().getKylinMetricsSubjectQueryCube());
+        String sql = "select " + cuboidColumn + ", sum(" + hitMeasure + ")" //
+                + " from " + table//
+                + " where " + QueryCubePropertyEnum.CUBE.toString() + " = '" + cubeName + "'" //
+                + " group by " + cuboidColumn;
+        List<List<String>> orgHitFrequency = queryService.querySystemCube(sql).getResults();
+        return formatQueryCount(orgHitFrequency);
+    }
+
+    public Map<Long, Map<Long, Pair<Long, Long>>> getCuboidRollingUpStats(String cubeName) {
+        String cuboidSource = QueryCubePropertyEnum.CUBOID_SOURCE.toString();
+        String cuboidTgt = QueryCubePropertyEnum.CUBOID_TARGET.toString();
+        String aggCount = QueryCubePropertyEnum.AGGR_COUNT.toString();
+        String returnCount = QueryCubePropertyEnum.RETURN_COUNT.toString();
+        String table = getMetricsManager().getSystemTableFromSubject(getConfig().getKylinMetricsSubjectQueryCube());
+        String sql = "select " + cuboidSource + ", " + cuboidTgt + ", avg(" + aggCount + "), avg(" + returnCount + ")"//
+                + " from " + table //
+                + " where " + QueryCubePropertyEnum.CUBE.toString() + " = '" + cubeName + "' " //
+                + " group by " + cuboidSource + ", " + cuboidTgt;
+        List<List<String>> orgRollingUpCount = queryService.querySystemCube(sql).getResults();
+        return formatRollingUpStats(orgRollingUpCount);
+    }
+
+    public Map<Long, Long> getCuboidQueryMatchCount(String cubeName) {
+        String cuboidSource = QueryCubePropertyEnum.CUBOID_SOURCE.toString();
+        String hitMeasure = QueryCubePropertyEnum.WEIGHT_PER_HIT.toString();
+        String table = getMetricsManager().getSystemTableFromSubject(getConfig().getKylinMetricsSubjectQueryCube());
+        String sql = "select " + cuboidSource + ", sum(" + hitMeasure + ")" //
+                + " from " + table //
+                + " where " + QueryCubePropertyEnum.CUBE.toString() + " = '" + cubeName + "'" //
+                + " and " + QueryCubePropertyEnum.IF_MATCH.toString() + " = true" //
+                + " group by " + cuboidSource;
+        List<List<String>> orgMatchHitFrequency = queryService.querySystemCube(sql).getResults();
+        return formatQueryCount(orgMatchHitFrequency);
+    }
+
+    @PreAuthorize(Constant.ACCESS_HAS_ROLE_ADMIN
+            + " or hasPermission(#cube, 'ADMINISTRATION') or hasPermission(#cube, 'MANAGEMENT')")
+    public void migrateCube(CubeInstance cube, String projectName) {
+        KylinConfig config = cube.getConfig();
+        if (!config.isAllowAutoMigrateCube()) {
+            throw new InternalErrorException("One click migration is disabled, please contact your ADMIN");
+        }
+
+        for (CubeSegment segment : cube.getSegments()) {
+            if (segment.getStatus() != SegmentStatusEnum.READY) {
+                throw new InternalErrorException(
+                        "At least one segment is not in READY state. Please check whether there are Running or Error jobs.");
+            }
+        }
+
+        String srcCfgUri = config.getAutoMigrateCubeSrcConfig();
+        String dstCfgUri = config.getAutoMigrateCubeDestConfig();
+
+        Preconditions.checkArgument(StringUtils.isNotEmpty(srcCfgUri), "Source configuration should not be empty.");
+        Preconditions.checkArgument(StringUtils.isNotEmpty(dstCfgUri),
+                "Destination configuration should not be empty.");
+
+        String stringBuilder = ("%s/bin/kylin.sh org.apache.kylin.tool.CubeMigrationCLI %s %s %s %s %s %s true true");
+        String cmd = String.format(Locale.ROOT, stringBuilder, KylinConfig.getKylinHome(), srcCfgUri, dstCfgUri,
+                cube.getName(), projectName, config.isAutoMigrateCubeCopyAcl(), config.isAutoMigrateCubePurge());
+
+        logger.info("One click migration cmd: " + cmd);
+
+        CliCommandExecutor exec = new CliCommandExecutor();
+        PatternedLogger patternedLogger = new PatternedLogger(logger);
+
+        try {
+            exec.execute(cmd, patternedLogger);
+        } catch (IOException e) {
+            throw new InternalErrorException("Failed to perform one-click migrating", e);
+        }
+    }
 }

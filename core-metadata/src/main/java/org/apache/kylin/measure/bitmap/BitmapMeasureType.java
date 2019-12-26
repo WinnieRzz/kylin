@@ -18,8 +18,10 @@
 
 package org.apache.kylin.measure.bitmap;
 
+import static com.google.common.base.Preconditions.checkArgument;
+
+import java.util.Arrays;
 import java.util.Collections;
-import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 
@@ -33,19 +35,24 @@ import org.apache.kylin.metadata.datatype.DataTypeSerializer;
 import org.apache.kylin.metadata.model.FunctionDesc;
 import org.apache.kylin.metadata.model.MeasureDesc;
 import org.apache.kylin.metadata.model.TblColRef;
+import org.apache.kylin.metadata.realization.SQLDigest;
+import org.apache.kylin.metadata.realization.SQLDigest.SQLCall;
+
+import com.google.common.collect.ImmutableMap;
 
 /**
  * Created by sunyerui on 15/12/10.
  */
 public class BitmapMeasureType extends MeasureType<BitmapCounter> {
-    public static final String FUNC_COUNT_DISTINCT = "COUNT_DISTINCT";
+    public static final String FUNC_COUNT_DISTINCT = FunctionDesc.FUNC_COUNT_DISTINCT;
+    public static final String FUNC_INTERSECT_COUNT_DISTINCT = "INTERSECT_COUNT";
     public static final String DATATYPE_BITMAP = "bitmap";
 
     public static class Factory extends MeasureTypeFactory<BitmapCounter> {
 
         @Override
         public MeasureType<BitmapCounter> createMeasureType(String funcName, DataType dataType) {
-            return new BitmapMeasureType(funcName, dataType);
+            return new BitmapMeasureType();
         }
 
         @Override
@@ -64,19 +71,19 @@ public class BitmapMeasureType extends MeasureType<BitmapCounter> {
         }
     }
 
-    public DataType dataType;
-
-    public BitmapMeasureType(String funcName, DataType dataType) {
-        this.dataType = dataType;
+    public BitmapMeasureType() {
     }
 
     @Override
     public void validate(FunctionDesc functionDesc) throws IllegalArgumentException {
-        if (FUNC_COUNT_DISTINCT.equals(functionDesc.getExpression()) == false)
-            throw new IllegalArgumentException("BitmapMeasureType func is not " + FUNC_COUNT_DISTINCT + " but " + functionDesc.getExpression());
+        checkArgument(FUNC_COUNT_DISTINCT.equals(functionDesc.getExpression()),
+                "BitmapMeasureType only support function %s, got %s", FUNC_COUNT_DISTINCT, functionDesc.getExpression());
+        checkArgument(functionDesc.getParameterCount() == 1,
+                "BitmapMeasureType only support 1 parameter, got %d", functionDesc.getParameterCount());
 
-        if (DATATYPE_BITMAP.equals(functionDesc.getReturnDataType().getName()) == false)
-            throw new IllegalArgumentException("BitmapMeasureType datatype is not " + DATATYPE_BITMAP + " but " + functionDesc.getReturnDataType().getName());
+        String returnType = functionDesc.getReturnDataType().getName();
+        checkArgument(DATATYPE_BITMAP.equals(returnType),
+                "BitmapMeasureType's return type must be %s, got %s", DATATYPE_BITMAP, returnType);
     }
 
     @Override
@@ -86,52 +93,43 @@ public class BitmapMeasureType extends MeasureType<BitmapCounter> {
 
     @Override
     public MeasureIngester<BitmapCounter> newIngester() {
+        final BitmapCounterFactory factory = RoaringBitmapCounterFactory.INSTANCE;
+
         return new MeasureIngester<BitmapCounter>() {
-            BitmapCounter current = new BitmapCounter();
+            BitmapCounter current = factory.newBitmap();
 
             @Override
             public BitmapCounter valueOf(String[] values, MeasureDesc measureDesc, Map<TblColRef, Dictionary<String>> dictionaryMap) {
-                BitmapCounter bitmap = current;
-                bitmap.clear();
+                checkArgument(values.length == 1, "expect 1 value, got %s", Arrays.toString(values));
+
+                current.clear();
+
+                if (values[0] == null) {
+                    return current;
+                }
+
+                int id;
                 if (needDictionaryColumn(measureDesc.getFunction())) {
                     TblColRef literalCol = measureDesc.getFunction().getParameter().getColRefs().get(0);
                     Dictionary<String> dictionary = dictionaryMap.get(literalCol);
-                    if (values != null && values.length > 0 && values[0] != null) {
-                        int id = dictionary.getIdFromValue(values[0]);
-                        bitmap.add(id);
-                    }
+                    id = dictionary.getIdFromValue(values[0]);
                 } else {
-                    for (String value : values) {
-                        bitmap.add(value);
-                    }
+                    id = Integer.parseInt(values[0]);
                 }
-                return bitmap;
+
+                current.add(id);
+                return current;
             }
 
             @Override
             public BitmapCounter reEncodeDictionary(BitmapCounter value, MeasureDesc measureDesc, Map<TblColRef, Dictionary<String>> oldDicts, Map<TblColRef, Dictionary<String>> newDicts) {
-                if (!needDictionaryColumn(measureDesc.getFunction())) {
-                    return value;
-                }
-                TblColRef colRef = measureDesc.getFunction().getParameter().getColRefs().get(0);
-                Dictionary<String> sourceDict = oldDicts.get(colRef);
-                Dictionary<String> mergedDict = newDicts.get(colRef);
+                //BitmapCounter needn't reEncode
+                return value;
+            }
 
-                BitmapCounter retValue = new BitmapCounter();
-                byte[] literal = new byte[sourceDict.getSizeOfValue()];
-                Iterator<Integer> iterator = value.iterator();
-                while (iterator.hasNext()) {
-                    int id = iterator.next();
-                    int newId;
-                    int size = sourceDict.getValueBytesFromId(id, literal, 0);
-                    if (size < 0) {
-                        newId = mergedDict.nullId();
-                    } else {
-                        newId = mergedDict.getIdFromValueBytes(literal, 0, size);
-                    }
-                    retValue.add(newId);
-                }
-                return retValue;
+            @Override
+            public void reset() {
+                current = factory.newBitmap();
             }
         };
     }
@@ -150,22 +148,40 @@ public class BitmapMeasureType extends MeasureType<BitmapCounter> {
         }
     }
 
+    // In order to keep compatibility with old version, tinyint/smallint/int column use value directly, without dictionary
+    private boolean needDictionaryColumn(FunctionDesc functionDesc) {
+        DataType dataType = functionDesc.getParameter().getColRefs().get(0).getType();
+        if (functionDesc.isMrDict()) {
+            return false;
+        }
+        if (dataType.isIntegerFamily() && !dataType.isBigInt()) {
+            return false;
+        }
+        return true;
+    }
+
     @Override
     public boolean needRewrite() {
         return true;
     }
 
+    static final Map<String, Class<?>> UDAF_MAP = ImmutableMap.of(
+            FUNC_COUNT_DISTINCT, BitmapDistinctCountAggFunc.class,
+            FUNC_INTERSECT_COUNT_DISTINCT, BitmapIntersectDistinctCountAggFunc.class);
+
     @Override
-    public Class<?> getRewriteCalciteAggrFunctionClass() {
-        return BitmapDistinctCountAggFunc.class;
+    public Map<String, Class<?>> getRewriteCalciteAggrFunctions() {
+        return UDAF_MAP;
     }
 
-    // In order to keep compatibility with old version, tinyint/smallint/int column use value directly, without dictionary
-    private boolean needDictionaryColumn(FunctionDesc functionDesc) {
-        DataType dataType = functionDesc.getParameter().getColRefs().get(0).getType();
-        if (dataType.isIntegerFamily() && !dataType.isBigInt()) {
-            return false;
+    @Override
+    public void adjustSqlDigest(List<MeasureDesc> measureDescs, SQLDigest sqlDigest) {
+        for (SQLCall call : sqlDigest.aggrSqlCalls) {
+            if (FUNC_INTERSECT_COUNT_DISTINCT.equals(call.function)) {
+                TblColRef col = (TblColRef) call.args.get(1);
+                if (!sqlDigest.groupbyColumns.contains(col))
+                    sqlDigest.groupbyColumns.add(col);
+            }
         }
-        return true;
     }
 }

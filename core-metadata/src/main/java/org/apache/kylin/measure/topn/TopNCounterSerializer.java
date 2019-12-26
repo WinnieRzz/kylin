@@ -23,6 +23,7 @@ import java.util.Iterator;
 import java.util.List;
 
 import org.apache.kylin.common.util.ByteArray;
+import org.apache.kylin.dimension.DictionaryDimEnc;
 import org.apache.kylin.metadata.datatype.DataType;
 import org.apache.kylin.metadata.datatype.DataTypeSerializer;
 
@@ -35,8 +36,14 @@ public class TopNCounterSerializer extends DataTypeSerializer<TopNCounter<ByteAr
 
     private int precision;
 
+    private int scale;
+
     public TopNCounterSerializer(DataType dataType) {
         this.precision = dataType.getPrecision();
+        this.scale = dataType.getScale();
+        if (scale < 0) {
+            scale = DictionaryDimEnc.MAX_ENCODING_LENGTH;
+        }
     }
 
     @Override
@@ -54,19 +61,19 @@ public class TopNCounterSerializer extends DataTypeSerializer<TopNCounter<ByteAr
 
     @Override
     public int maxLength() {
-        return precision * TopNCounter.EXTRA_SPACE_RATE * (4 + 8);
+        return Math.max(precision * TopNCounter.EXTRA_SPACE_RATE * storageBytesEstimatePerCounter(), 1024 * 1024); // use at least 1M
     }
 
     @Override
     public int getStorageBytesEstimate() {
-        return precision * TopNCounter.EXTRA_SPACE_RATE * 8;
+        return precision * TopNCounter.EXTRA_SPACE_RATE * storageBytesEstimatePerCounter();
     }
 
     @Override
     public void serialize(TopNCounter<ByteArray> value, ByteBuffer out) {
         double[] counters = value.getCounters();
-        List<ByteArray> peek = value.peek(1);
-        int keyLength = peek.size() > 0 ? peek.get(0).length() : 0;
+        List<Counter<ByteArray>> peek = value.topK(1);
+        int keyLength = !peek.isEmpty() ? peek.get(0).getItem().length() : 0;
         out.putInt(value.getCapacity());
         out.putInt(value.size());
         out.putInt(keyLength);
@@ -86,7 +93,7 @@ public class TopNCounterSerializer extends DataTypeSerializer<TopNCounter<ByteAr
         int keyLength = in.getInt();
         double[] counters = dds.deserialize(in);
 
-        TopNCounter<ByteArray> counter = new TopNCounter<ByteArray>(capacity);
+        TopNCounter<ByteArray> counter = new TopNCounter<>(capacity);
         ByteArray byteArray;
         byte[] keyArray = new byte[size * keyLength];
         int offset = 0;
@@ -98,6 +105,19 @@ public class TopNCounterSerializer extends DataTypeSerializer<TopNCounter<ByteAr
         }
 
         return counter;
+    }
+
+    @Override
+    protected double getStorageBytesEstimate(double averageNumOfElementsInCounter) {
+        if (averageNumOfElementsInCounter < precision * TopNCounter.EXTRA_SPACE_RATE) {
+            return averageNumOfElementsInCounter * storageBytesEstimatePerCounter() + 12;
+        } else {
+            return getStorageBytesEstimate();
+        }
+    }
+
+    private int storageBytesEstimatePerCounter() {
+        return (scale + 8);
     }
 
 }

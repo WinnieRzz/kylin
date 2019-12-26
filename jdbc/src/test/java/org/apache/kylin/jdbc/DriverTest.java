@@ -19,6 +19,7 @@
 package org.apache.kylin.jdbc;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
 
 import java.sql.Connection;
 import java.sql.PreparedStatement;
@@ -28,6 +29,8 @@ import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.Properties;
 
+import org.apache.calcite.avatica.DriverVersion;
+import org.junit.Assert;
 import org.junit.Ignore;
 import org.junit.Test;
 
@@ -35,6 +38,13 @@ import org.junit.Test;
  * Unit test for Driver.
  */
 public class DriverTest {
+
+    @Test
+    public void testVersion() {
+        Driver driver = new DummyDriver();
+        DriverVersion version = driver.getDriverVersion();
+        Assert.assertNotEquals("unknown version", version.productVersion);
+    }
 
     @Test
     public void testStatementWithMockData() throws SQLException {
@@ -78,6 +88,52 @@ public class DriverTest {
         Connection conn = driver.connect("jdbc:kylin://test_url/test_db", null);
         Statement state = conn.createStatement();
         ResultSet resultSet = state.executeQuery("select * from test_table where url not in ('http://a.b.com/?a=b')");
+        ResultSetMetaData metadata = resultSet.getMetaData();
+        assertEquals(12, metadata.getColumnType(1));
+        assertEquals("varchar", metadata.getColumnTypeName(1));
+        assertEquals(1, metadata.isNullable(1));
+
+        while (resultSet.next()) {
+            assertEquals("foo", resultSet.getString(1));
+            assertEquals("bar", resultSet.getString(2));
+            assertEquals("tool", resultSet.getString(3));
+        }
+
+        resultSet.close();
+        state.close();
+        conn.close();
+    }
+
+    @Test
+    public void testDateAndTimeStampWithMockData() throws SQLException {
+        Driver driver = new DummyDriver();
+
+        Connection conn = driver.connect("jdbc:kylin://test_url/test_db", null);
+        PreparedStatement state = conn.prepareStatement("select * from test_table where id=?");
+        state.setInt(1, 10);
+        ResultSet resultSet = state.executeQuery();
+
+        ResultSetMetaData metadata = resultSet.getMetaData();
+        assertEquals("date", metadata.getColumnTypeName(4));
+        assertEquals("timestamp", metadata.getColumnTypeName(5));
+
+        while (resultSet.next()) {
+            assertEquals("2019-04-27", resultSet.getString(4));
+            assertEquals("2019-04-27 17:30:03", resultSet.getString(5));
+        }
+
+        resultSet.close();
+        state.close();
+        conn.close();
+    }
+
+    @Test
+    public void testMultipathOfDomainForConnection() throws SQLException {
+        Driver driver = new DummyDriver();
+
+        Connection conn = driver.connect("jdbc:kylin://test_url/kylin/test_db/", null);
+        Statement state = conn.createStatement();
+        ResultSet resultSet = state.executeQuery("select * from test_table where url not in ('http://a.b.com/?a=b') limit 1");
         ResultSetMetaData metadata = resultSet.getMetaData();
         assertEquals(12, metadata.getColumnType(1));
         assertEquals("varchar", metadata.getColumnTypeName(1));
@@ -168,7 +224,8 @@ public class DriverTest {
         info.put("password", "KYLIN");
         Connection conn = driver.connect("jdbc:kylin://localhost:7070/default", info);
 
-        PreparedStatement state = conn.prepareStatement("select cal_dt, count(*) from test_kylin_fact where seller_id=? group by cal_dt");
+        PreparedStatement state = conn
+                .prepareStatement("select cal_dt, count(*) from test_kylin_fact where seller_id=? group by cal_dt");
         state.setLong(1, 10000001);
         ResultSet resultSet = state.executeQuery();
 
@@ -178,6 +235,42 @@ public class DriverTest {
         resultSet.close();
         state.close();
         conn.close();
+    }
+
+    @Test
+    public void testSSLFromURL() throws SQLException {
+        Driver driver = new DummyDriver();
+        Connection conn = driver.connect("jdbc:kylin:ssl=True;//test_url/test_db", null);
+        assertEquals("test_url", ((KylinConnection) conn).getBaseUrl());
+        assertEquals("test_db", ((KylinConnection) conn).getProject());
+        assertTrue(Boolean.parseBoolean((String) ((KylinConnection) conn).getConnectionProperties().get("ssl")));
+        conn.close();
+    }
+
+    @Test
+    public void testCalciteProps() throws SQLException {
+        Driver driver = new DummyDriver();
+        Properties props = new Properties();
+        props.setProperty("kylin.query.calcite.extras-props.caseSensitive", "true");
+        props.setProperty("kylin.query.calcite.extras-props.unquotedCasing", "TO_LOWER");
+        props.setProperty("kylin.query.calcite.extras-props.quoting", "BRACKET");
+        KylinConnection conn = (KylinConnection) driver.connect("jdbc:kylin:test_url/test_db", props);
+        Properties connProps = conn.getConnectionProperties();
+        assertEquals("true", connProps.getProperty("kylin.query.calcite.extras-props.caseSensitive"));
+        assertEquals("TO_LOWER", connProps.getProperty("kylin.query.calcite.extras-props.unquotedCasing"));
+        assertEquals("BRACKET", connProps.getProperty("kylin.query.calcite.extras-props.quoting"));
+
+        // parameters in url is prior to props parameter
+        KylinConnection conn2 = (KylinConnection) driver.connect("jdbc:kylin:kylin.query.calcite.extras-props.caseSensitive=false;" +
+                "kylin.query.calcite.extras-props.unquotedCasing=UNCHANGED;" +
+                "kylin.query.calcite.extras-props.quoting=BACK_TICK;" +
+                "test_url/test_db", props);
+        Properties connProps2 = conn2.getConnectionProperties();
+        assertEquals("false", connProps2.getProperty("kylin.query.calcite.extras-props.caseSensitive"));
+        assertEquals("UNCHANGED", connProps2.getProperty("kylin.query.calcite.extras-props.unquotedCasing"));
+        assertEquals("BACK_TICK", connProps2.getProperty("kylin.query.calcite.extras-props.quoting"));
+        conn.close();
+        conn2.close();
     }
 
     private void printResultSet(ResultSet rs) throws SQLException {
@@ -202,7 +295,12 @@ public class DriverTest {
         System.out.println("Metadata:");
 
         for (int i = 0; i < metadata.getColumnCount(); i++) {
-            String metaStr = metadata.getCatalogName(i + 1) + " " + metadata.getColumnClassName(i + 1) + " " + metadata.getColumnDisplaySize(i + 1) + " " + metadata.getColumnLabel(i + 1) + " " + metadata.getColumnName(i + 1) + " " + metadata.getColumnType(i + 1) + " " + metadata.getColumnTypeName(i + 1) + " " + metadata.getPrecision(i + 1) + " " + metadata.getScale(i + 1) + " " + metadata.getSchemaName(i + 1) + " " + metadata.getTableName(i + 1);
+            String metaStr = metadata.getCatalogName(i + 1) + " " + metadata.getColumnClassName(i + 1) + " "
+                    + metadata.getColumnDisplaySize(i + 1) + " " + metadata.getColumnLabel(i + 1) + " "
+                    + metadata.getColumnName(i + 1) + " " + metadata.getColumnType(i + 1) + " "
+                    + metadata.getColumnTypeName(i + 1) + " " + metadata.getPrecision(i + 1) + " "
+                    + metadata.getScale(i + 1) + " " + metadata.getSchemaName(i + 1) + " "
+                    + metadata.getTableName(i + 1);
             System.out.println(metaStr);
         }
     }

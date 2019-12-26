@@ -21,9 +21,16 @@ package org.apache.kylin.provision;
 import java.io.File;
 import java.io.IOException;
 import java.lang.reflect.Method;
+import java.text.ParseException;
 import java.text.SimpleDateFormat;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Random;
+import java.util.Set;
 import java.util.TimeZone;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CountDownLatch;
@@ -32,86 +39,119 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 
 import org.apache.commons.lang3.StringUtils;
-import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
-import org.apache.hadoop.hbase.HBaseConfiguration;
-import org.apache.hadoop.hbase.client.HTable;
+import org.apache.hadoop.hbase.client.Connection;
 import org.apache.kylin.common.KylinConfig;
 import org.apache.kylin.common.util.ClassUtil;
+import org.apache.kylin.common.util.DateFormat;
 import org.apache.kylin.common.util.HBaseMetadataTestCase;
+import org.apache.kylin.common.util.HadoopUtil;
 import org.apache.kylin.common.util.Pair;
+import org.apache.kylin.cube.CubeDescManager;
 import org.apache.kylin.cube.CubeInstance;
 import org.apache.kylin.cube.CubeManager;
 import org.apache.kylin.cube.CubeSegment;
-import org.apache.kylin.cube.CubeUpdate;
+import org.apache.kylin.cube.DimensionRangeInfo;
+import org.apache.kylin.cube.cuboid.CuboidScheduler;
+import org.apache.kylin.cube.model.CubeDesc;
 import org.apache.kylin.engine.EngineFactory;
+import org.apache.kylin.engine.mr.BatchOptimizeJobCheckpointBuilder;
 import org.apache.kylin.engine.mr.CubingJob;
-import org.apache.kylin.engine.mr.HadoopUtil;
 import org.apache.kylin.job.DeployUtil;
 import org.apache.kylin.job.engine.JobEngineConfig;
 import org.apache.kylin.job.execution.AbstractExecutable;
+import org.apache.kylin.job.execution.CheckpointExecutable;
 import org.apache.kylin.job.execution.DefaultChainedExecutable;
+import org.apache.kylin.job.execution.ExecutableManager;
 import org.apache.kylin.job.execution.ExecutableState;
+import org.apache.kylin.job.execution.Output;
 import org.apache.kylin.job.impl.threadpool.DefaultScheduler;
-import org.apache.kylin.job.manager.ExecutableManager;
+import org.apache.kylin.job.lock.zookeeper.ZookeeperJobLock;
+import org.apache.kylin.metadata.model.SegmentRange.TSRange;
+import org.apache.kylin.metadata.model.Segments;
+import org.apache.kylin.metadata.model.TblColRef;
+import org.apache.kylin.rest.job.StorageCleanupJob;
+import org.apache.kylin.storage.hbase.HBaseConnection;
 import org.apache.kylin.storage.hbase.util.HBaseRegionSizeCalculator;
-import org.apache.kylin.storage.hbase.util.StorageCleanupJob;
-import org.apache.kylin.storage.hbase.util.ZookeeperJobLock;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
+import com.google.common.collect.Sets;
 
 public class BuildCubeWithEngine {
 
     private CubeManager cubeManager;
+    private CubeDescManager cubeDescManager;
     private DefaultScheduler scheduler;
-    protected ExecutableManager jobService;
+    private ExecutableManager jobService;
     private static boolean fastBuildMode = false;
+    private static boolean simpleBuildMode = false;
+    private static int engineType;
 
     private static final Logger logger = LoggerFactory.getLogger(BuildCubeWithEngine.class);
 
     public static void main(String[] args) throws Exception {
+        long start = System.currentTimeMillis();
+        int exitCode = 0;
         try {
             beforeClass();
 
             BuildCubeWithEngine buildCubeWithEngine = new BuildCubeWithEngine();
             buildCubeWithEngine.before();
             buildCubeWithEngine.build();
+            buildCubeWithEngine.after();
             logger.info("Build is done");
             afterClass();
             logger.info("Going to exit");
-            System.exit(0);
-        } catch (Exception e) {
+        } catch (Throwable e) {
             logger.error("error", e);
-            System.exit(1);
+            exitCode = 1;
         }
+
+        long millis = System.currentTimeMillis() - start;
+        System.out.println("Time elapsed: " + (millis / 1000) + " sec - in " + BuildCubeWithEngine.class.getName());
+
+        System.exit(exitCode);
     }
 
     public static void beforeClass() throws Exception {
-        logger.info("Adding to classpath: " + new File(HBaseMetadataTestCase.SANDBOX_TEST_DATA).getAbsolutePath());
-        ClassUtil.addClasspath(new File(HBaseMetadataTestCase.SANDBOX_TEST_DATA).getAbsolutePath());
+        beforeClass(HBaseMetadataTestCase.SANDBOX_TEST_DATA);
+    }
 
-        String fastModeStr = System.getProperty("fastBuildMode");
-        if (fastModeStr != null && fastModeStr.equalsIgnoreCase("true")) {
-            fastBuildMode = true;
+    public static void beforeClass(String confDir) throws Exception {
+        logger.info("Adding to classpath: " + new File(confDir).getAbsolutePath());
+        ClassUtil.addClasspath(new File(confDir).getAbsolutePath());
+
+        fastBuildMode = isFastBuildMode();
+        simpleBuildMode = isSimpleBuildMode();
+        if (fastBuildMode) {
             logger.info("Will use fast build mode");
-        } else {
-            logger.info("Will not use fast build mode");
+        }
+        if (simpleBuildMode) {
+            logger.info("Will use simple build mode");
         }
 
-        System.setProperty(KylinConfig.KYLIN_CONF, HBaseMetadataTestCase.SANDBOX_TEST_DATA);
+        String specifiedEngineType = System.getProperty("engineType");
+        if (StringUtils.isNotEmpty(specifiedEngineType)) {
+            engineType = Integer.parseInt(specifiedEngineType);
+        }
+
+        System.setProperty(KylinConfig.KYLIN_CONF, confDir);
+        System.setProperty("SPARK_HOME", "/usr/local/spark"); // need manually create and put spark to this folder on Jenkins
+        System.setProperty("kylin.hadoop.conf.dir", confDir);
         if (StringUtils.isEmpty(System.getProperty("hdp.version"))) {
-            throw new RuntimeException("No hdp.version set; Please set hdp.version in your jvm option, for example: -Dhdp.version=2.2.4.2-2");
+            throw new RuntimeException(
+                    "No hdp.version set; Please set hdp.version in your jvm option, for example: -Dhdp.version=2.4.0.0-169");
         }
 
-        HBaseMetadataTestCase.staticCreateTestMetadata(HBaseMetadataTestCase.SANDBOX_TEST_DATA);
+        HBaseMetadataTestCase.staticCreateTestMetadata(confDir);
 
         try {
             //check hdfs permission
-            Configuration hconf = HadoopUtil.getCurrentConfiguration();
-            FileSystem fileSystem = FileSystem.get(hconf);
+            FileSystem fileSystem = HadoopUtil.getWorkingFileSystem();
             String hdfsWorkingDirectory = KylinConfig.getInstanceFromEnv().getHdfsWorkingDirectory();
             Path coprocessorDir = new Path(hdfsWorkingDirectory);
             boolean success = fileSystem.mkdirs(coprocessorDir);
@@ -119,8 +159,27 @@ public class BuildCubeWithEngine {
                 throw new IOException("mkdir fails");
             }
         } catch (IOException e) {
-            throw new RuntimeException("failed to create kylin.hdfs.working.dir, Please make sure the user has right to access " + KylinConfig.getInstanceFromEnv().getHdfsWorkingDirectory(), e);
+            throw new RuntimeException(
+                    "failed to create kylin.env.hdfs-working-dir, Please make sure the user has right to access "
+                            + KylinConfig.getInstanceFromEnv().getHdfsWorkingDirectory(),
+                    e);
         }
+    }
+
+    private static boolean isFastBuildMode() {
+        String fastModeStr = System.getProperty("fastBuildMode");
+        if (fastModeStr == null)
+            fastModeStr = System.getenv("KYLIN_CI_FASTBUILD");
+
+        return "true".equalsIgnoreCase(fastModeStr);
+    }
+
+    private static boolean isSimpleBuildMode() {
+        String simpleModeStr = System.getProperty("simpleBuildMode");
+        if (simpleModeStr == null)
+            simpleModeStr = System.getenv("KYLIN_CI_SIMPLEBUILD");
+
+        return "true".equalsIgnoreCase(simpleModeStr);
     }
 
     protected void deployEnv() throws IOException {
@@ -141,11 +200,20 @@ public class BuildCubeWithEngine {
         }
         cubeManager = CubeManager.getInstance(kylinConfig);
         for (String jobId : jobService.getAllJobIds()) {
-            if (jobService.getJob(jobId) instanceof CubingJob) {
+            AbstractExecutable executable = jobService.getJob(jobId);
+            if (executable instanceof CubingJob || executable instanceof CheckpointExecutable) {
                 jobService.deleteJob(jobId);
             }
         }
 
+        cubeDescManager = CubeDescManager.getInstance(kylinConfig);
+
+        // update enginType
+        updateCubeEngineType(Lists.newArrayList("ci_inner_join_cube", "ci_left_join_cube"));
+    }
+
+    public void after() {
+        DefaultScheduler.destroyInstance();
     }
 
     public static void afterClass() {
@@ -153,19 +221,20 @@ public class BuildCubeWithEngine {
     }
 
     public void build() throws Exception {
-        DeployUtil.prepareTestDataForNormalCubes("test_kylin_cube_with_slr_empty");
-        KylinConfig.getInstanceFromEnv().setHBaseHFileSizeGB(1.0f);
-        testInner();
-        testLeft();
-        testViewAsLookup();
-        KylinConfig.getInstanceFromEnv().setHBaseHFileSizeGB(0.0f);
+        DeployUtil.prepareTestDataForNormalCubes("ci_left_join_model");
+        System.setProperty("kylin.storage.hbase.hfile-size-gb", "1.0f");
+        testCase("testInnerJoinCube");
+        testCase("testLeftJoinCube");
+        testCase("testTableExt");
+        testCase("testModel");
+        System.setProperty("kylin.storage.hbase.hfile-size-gb", "0.0f");
     }
 
-    protected void waitForJob(String jobId) {
+    protected ExecutableState waitForJob(String jobId) {
         while (true) {
             AbstractExecutable job = jobService.getJob(jobId);
             if (job.getStatus() == ExecutableState.SUCCEED || job.getStatus() == ExecutableState.ERROR) {
-                break;
+                return job.getStatus();
             } else {
                 try {
                     Thread.sleep(5000);
@@ -176,35 +245,24 @@ public class BuildCubeWithEngine {
         }
     }
 
-    private void testInner() throws Exception {
-        String[] testCase = new String[] { "testInnerJoinCubeWithoutSlr", "testInnerJoinCubeWithSlr" };
-        runTestAndAssertSucceed(testCase);
-    }
-
-    private void testLeft() throws Exception {
-        String[] testCase = new String[] { "testLeftJoinCubeWithSlr", "testLeftJoinCubeWithoutSlr" };
-        runTestAndAssertSucceed(testCase);
-    }
-
-    private void testViewAsLookup() throws Exception {
-        String[] testCase = new String[] { "testInnerJoinCubeWithView", "testLeftJoinCubeWithView" };
+    private void testCase(String... testCase) throws Exception {
         runTestAndAssertSucceed(testCase);
     }
 
     private void runTestAndAssertSucceed(String[] testCase) throws Exception {
         ExecutorService executorService = Executors.newFixedThreadPool(testCase.length);
         final CountDownLatch countDownLatch = new CountDownLatch(testCase.length);
-        List<Future<List<String>>> tasks = Lists.newArrayListWithExpectedSize(testCase.length);
+        List<Future<Boolean>> tasks = Lists.newArrayListWithExpectedSize(testCase.length);
         for (int i = 0; i < testCase.length; i++) {
             tasks.add(executorService.submit(new TestCallable(testCase[i], countDownLatch)));
         }
         countDownLatch.await();
         try {
             for (int i = 0; i < tasks.size(); ++i) {
-                Future<List<String>> task = tasks.get(i);
-                final List<String> jobIds = task.get();
-                for (String jobId : jobIds) {
-                    assertJobSucceed(jobId);
+                Future<Boolean> task = tasks.get(i);
+                final Boolean result = task.get();
+                if (!result) {
+                    throw new RuntimeException("The test '" + testCase[i] + "' is failed.");
                 }
             }
         } catch (Exception ex) {
@@ -213,13 +271,7 @@ public class BuildCubeWithEngine {
         }
     }
 
-    private void assertJobSucceed(String jobId) {
-        if (jobService.getOutput(jobId).getState() != ExecutableState.SUCCEED) {
-            throw new RuntimeException("The job '" + jobId + "' is failed.");
-        }
-    }
-
-    private class TestCallable implements Callable<List<String>> {
+    private class TestCallable implements Callable<Boolean> {
 
         private final String methodName;
         private final CountDownLatch countDownLatch;
@@ -229,13 +281,12 @@ public class BuildCubeWithEngine {
             this.countDownLatch = countDownLatch;
         }
 
-        @SuppressWarnings("unchecked")
         @Override
-        public List<String> call() throws Exception {
+        public Boolean call() throws Exception {
             try {
                 final Method method = BuildCubeWithEngine.class.getDeclaredMethod(methodName);
                 method.setAccessible(true);
-                return (List<String>) method.invoke(BuildCubeWithEngine.this);
+                return (Boolean) method.invoke(BuildCubeWithEngine.this);
             } catch (Exception e) {
                 logger.error(e.getMessage());
                 throw e;
@@ -245,168 +296,227 @@ public class BuildCubeWithEngine {
         }
     }
 
-    @SuppressWarnings("unused")
-    // called by reflection
-    private List<String> testInnerJoinCubeWithSlr() throws Exception {
-        final String cubeName = "test_kylin_cube_with_slr_empty";
-        clearSegment(cubeName);
-        SimpleDateFormat f = new SimpleDateFormat("yyyy-MM-dd");
-        f.setTimeZone(TimeZone.getTimeZone("GMT"));
-        long date1 = 0;
-        long date2 = f.parse("2015-01-01").getTime();
-        long date3 = f.parse("2022-01-01").getTime();
-        List<String> result = Lists.newArrayList();
+    protected boolean testTableExt() throws Exception {
+        return true;
+    }
 
-        if (fastBuildMode) {
-            result.add(buildSegment(cubeName, date1, date3));
-        } else {
-            result.add(buildSegment(cubeName, date1, date2));
-            result.add(buildSegment(cubeName, date2, date3));//empty segment
-        }
-        return result;
+    protected boolean testModel() throws Exception {
+        return true;
     }
 
     @SuppressWarnings("unused")
     // called by reflection
-    private List<String> testInnerJoinCubeWithoutSlr() throws Exception {
-
-        final String cubeName = "test_kylin_cube_without_slr_empty";
+    private boolean testLeftJoinCube() throws Exception {
+        String cubeName = "ci_left_join_cube";
         clearSegment(cubeName);
-        SimpleDateFormat f = new SimpleDateFormat("yyyy-MM-dd");
-        f.setTimeZone(TimeZone.getTimeZone("GMT"));
-        long date1 = 0;
-        long date2 = f.parse("2013-01-01").getTime();
-        long date3 = f.parse("2013-07-01").getTime();
-        long date4 = f.parse("2022-01-01").getTime();
-        List<String> result = Lists.newArrayList();
 
-        if (fastBuildMode) {
-            result.add(buildSegment(cubeName, date1, date4));
-        } else {
-            result.add(buildSegment(cubeName, date1, date2));
-            result.add(buildSegment(cubeName, date2, date3));
-            result.add(buildSegment(cubeName, date3, date4));
-            result.add(mergeSegment(cubeName, date1, date3));//don't merge all segments
-        }
-        return result;
+        // NOTE: ci_left_join_cube has percentile which isn't supported by Spark engine now
 
+        return doBuildAndMergeOnCube(cubeName);
     }
 
-    @SuppressWarnings("unused")
-    // called by reflection
-    private List<String> testLeftJoinCubeWithoutSlr() throws Exception {
-        SimpleDateFormat f = new SimpleDateFormat("yyyy-MM-dd");
+    private boolean doBuildAndMergeOnCube(String cubeName) throws ParseException, Exception {
+        SimpleDateFormat f = new SimpleDateFormat("yyyy-MM-dd", Locale.ROOT);
         f.setTimeZone(TimeZone.getTimeZone("GMT"));
-        List<String> result = Lists.newArrayList();
-        final String cubeName = "test_kylin_cube_without_slr_left_join_empty";
-        clearSegment(cubeName);
-
-        long date1 = cubeManager.getCube(cubeName).getDescriptor().getPartitionDateStart();
+        long date1 = 0;
         long date2 = f.parse("2012-06-01").getTime();
-        long date3 = f.parse("2022-01-01").getTime();
-        long date4 = f.parse("2023-01-01").getTime();
-
-        if (fastBuildMode) {
-            result.add(buildSegment(cubeName, date1, date4));
-        } else {
-            result.add(buildSegment(cubeName, date1, date2));
-            result.add(buildSegment(cubeName, date2, date3));
-            result.add(buildSegment(cubeName, date3, date4));//empty segment
-            result.add(mergeSegment(cubeName, date1, date3));//don't merge all segments
-        }
-
-        return result;
-
-    }
-
-    @SuppressWarnings("unused")
-    // called by reflection
-    private List<String> testLeftJoinCubeWithView() throws Exception {
-        SimpleDateFormat f = new SimpleDateFormat("yyyy-MM-dd");
-        f.setTimeZone(TimeZone.getTimeZone("GMT"));
-        List<String> result = Lists.newArrayList();
-        final String cubeName = "test_kylin_cube_with_view_left_join_empty";
-        clearSegment(cubeName);
-
-        long date1 = cubeManager.getCube(cubeName).getDescriptor().getPartitionDateStart();
-        long date4 = f.parse("2023-01-01").getTime();
-
-        result.add(buildSegment(cubeName, date1, date4));
-
-        return result;
-
-    }
-
-    @SuppressWarnings("unused")
-    // called by reflection
-    private List<String> testInnerJoinCubeWithView() throws Exception {
-        SimpleDateFormat f = new SimpleDateFormat("yyyy-MM-dd");
-        f.setTimeZone(TimeZone.getTimeZone("GMT"));
-        List<String> result = Lists.newArrayList();
-        final String cubeName = "test_kylin_cube_with_view_inner_join_empty";
-        clearSegment(cubeName);
-
-        long date1 = cubeManager.getCube(cubeName).getDescriptor().getPartitionDateStart();
-        long date4 = f.parse("2023-01-01").getTime();
-
-        result.add(buildSegment(cubeName, date1, date4));
-
-        return result;
-
-    }
-
-    @SuppressWarnings("unused")
-    // called by reflection
-    private List<String> testLeftJoinCubeWithSlr() throws Exception {
-        String cubeName = "test_kylin_cube_with_slr_left_join_empty";
-        clearSegment(cubeName);
-
-        SimpleDateFormat f = new SimpleDateFormat("yyyy-MM-dd");
-        f.setTimeZone(TimeZone.getTimeZone("GMT"));
-        long date1 = cubeManager.getCube(cubeName).getDescriptor().getPartitionDateStart();
-        long date2 = f.parse("2013-01-01").getTime();
         long date3 = f.parse("2013-07-01").getTime();
         long date4 = f.parse("2022-01-01").getTime();
-
-        List<String> result = Lists.newArrayList();
-        if (fastBuildMode) {
-            result.add(buildSegment(cubeName, date1, date4));
+        long date5 = f.parse("2023-01-01").getTime();
+        long date6 = f.parse("2024-01-01").getTime();
+        CubeInstance cube = cubeManager.getCube(cubeName);
+        if (simpleBuildMode) {
+            if (!buildSegment(cubeName, date1, date4))
+                return false;
         } else {
-            result.add(buildSegment(cubeName, date1, date2));
-            result.add(buildSegment(cubeName, date2, date3));
-            result.add(buildSegment(cubeName, date3, date4));
-            result.add(mergeSegment(cubeName, date1, date3));//don't merge all segments
+            if (!buildSegment(cubeName, date1, date2))
+                return false;
+            if (!fastBuildMode) {
+                checkNormalSegRangeInfo(cubeManager.getCube(cubeName));
+            }
+            if (!buildSegment(cubeName, date2, date3))
+                return false;
+            if (!fastBuildMode) {
+                checkNormalSegRangeInfo(cubeManager.getCube(cubeName));
+            }
+            if (!buildSegment(cubeName, date3, date4))
+                return false;
+            if (!fastBuildMode) {
+                checkNormalSegRangeInfo(cubeManager.getCube(cubeName));
+            }
+            if (!buildSegment(cubeName, date4, date5, true)) // one empty segment
+                return false;
+            if (!fastBuildMode) {
+                checkEmptySegRangeInfo(cubeManager.getCube(cubeName));
+            }
+            if (!buildSegment(cubeName, date5, date6, true)) // another empty segment
+                return false;
+            if (!fastBuildMode) {
+                checkEmptySegRangeInfo(cubeManager.getCube(cubeName));
+            }
+            if (fastBuildMode && !checkJobState()) {
+                return false;
+            }
+            logger.info("all of build jobs complete!");
+            if (!mergeSegment(cubeName, date2, date4)) // merge 2 normal segments
+                return false;
+            checkNormalSegRangeInfo(cubeManager.getCube(cubeName));
+            if (!mergeSegment(cubeName, date2, date5)) // merge normal and empty
+                return false;
+            checkNormalSegRangeInfo(cubeManager.getCube(cubeName));
         }
-        return result;
+        if (fastBuildMode && !checkJobState()) {
+            return false;
+        }
+        if (!simpleBuildMode && !optimizeCube(cubeName))
+            return false;
+        logger.info("all of jobs complete!");
+        return true;
+    }
 
+    @SuppressWarnings("unused")
+    // called by reflection
+    private boolean testInnerJoinCube() throws Exception {
+
+        String cubeName = "ci_inner_join_cube";
+        clearSegment(cubeName);
+
+        return doBuildAndMergeOnCube(cubeName);
+    }
+
+    private void updateCubeEngineType(List<String> cubeNames) throws IOException {
+        if (engineType != 0) {
+            for (String cubeName : cubeNames) {
+                CubeDesc cubeDesc = cubeDescManager.getCubeDesc(cubeName);
+                if (cubeDesc.getEngineType() != engineType) {
+                    cubeDesc.setEngineType(engineType);
+                    cubeDescManager.updateCubeDesc(cubeDesc);
+                }
+            }
+        }
     }
 
     private void clearSegment(String cubeName) throws Exception {
         CubeInstance cube = cubeManager.getCube(cubeName);
-        // remove all existing segments
-        CubeUpdate cubeBuilder = new CubeUpdate(cube);
-        cubeBuilder.setToRemoveSegs(cube.getSegments().toArray(new CubeSegment[cube.getSegments().size()]));
-        cubeManager.updateCube(cubeBuilder);
+        cubeManager.updateCubeDropSegments(cube, cube.getSegments());
     }
 
-    private String mergeSegment(String cubeName, long startDate, long endDate) throws Exception {
-        CubeSegment segment = cubeManager.mergeSegments(cubeManager.getCube(cubeName), startDate, endDate, 0, 0, true);
+    private Boolean optimizeCube(String cubeName) throws Exception {
+        CubeInstance cubeInstance = cubeManager.getCube(cubeName);
+        Set<Long> cuboidsRecommend = mockRecommendCuboids(cubeInstance, 0.05, 255);
+        CubeSegment[] optimizeSegments = cubeManager.optimizeSegments(cubeInstance, cuboidsRecommend);
+        List<AbstractExecutable> optimizeJobList = Lists.newArrayListWithExpectedSize(optimizeSegments.length);
+        for (CubeSegment optimizeSegment : optimizeSegments) {
+            DefaultChainedExecutable optimizeJob = EngineFactory.createBatchOptimizeJob(optimizeSegment, "TEST");
+            jobService.addJob(optimizeJob);
+            optimizeJobList.add(optimizeJob);
+            optimizeSegment.setLastBuildJobID(optimizeJob.getId());
+        }
+        CheckpointExecutable checkpointJob = new BatchOptimizeJobCheckpointBuilder(cubeInstance, "TEST").build();
+        checkpointJob.addTaskListForCheck(optimizeJobList);
+        jobService.addJob(checkpointJob);
+        if (fastBuildMode) {
+            return true;
+        }
+        ExecutableState state = waitForJob(checkpointJob.getId());
+        return Boolean.valueOf(ExecutableState.SUCCEED == state);
+    }
+
+    private static Map<String, String> jobCheckActionMap = new HashMap<>();
+    private static Map<String, CubeSegment> jobSegmentMap = new HashMap<>();
+
+    private Boolean mergeSegment(String cubeName, long startDate, long endDate) throws Exception {
+        CubeSegment segment = cubeManager.mergeSegments(cubeManager.getCube(cubeName), new TSRange(startDate, endDate),
+                null, true);
         DefaultChainedExecutable job = EngineFactory.createBatchMergeJob(segment, "TEST");
         jobService.addJob(job);
-        waitForJob(job.getId());
-        return job.getId();
+        ExecutableState state = waitForJob(job.getId());
+        return Boolean.valueOf(ExecutableState.SUCCEED == state);
     }
 
-    private String buildSegment(String cubeName, long startDate, long endDate) throws Exception {
-        CubeSegment segment = cubeManager.appendSegment(cubeManager.getCube(cubeName), 0, endDate, 0, 0);
+    private Boolean buildSegment(String cubeName, long startDate, long endDate, boolean isEmpty) throws Exception {
+        CubeInstance cubeInstance = cubeManager.getCube(cubeName);
+        CubeSegment segment = cubeManager.appendSegment(cubeInstance, new TSRange(0L, endDate));
         DefaultChainedExecutable job = EngineFactory.createBatchCubingJob(segment, "TEST");
         jobService.addJob(job);
-        waitForJob(job.getId());
-        //        if (segment.getCubeDesc().getEngineType() == IEngineAware.ID_MR_V1
-        //                || segment.getCubeDesc().getStorageType() == IStorageAware.ID_SHARDED_HBASE) {
-        //            checkHFilesInHBase(segment);
-        //        }
-        return job.getId();
+        if (fastBuildMode) {
+            jobSegmentMap.put(job.getId(), segment);
+            jobCheckActionMap.put(job.getId(), isEmpty ? "checkEmptySegRangeInfo" : "checkNormalSegRangeInfo");
+            return true;
+        }
+        ExecutableState state = waitForJob(job.getId());
+        return Boolean.valueOf(ExecutableState.SUCCEED == state);
+    }
+
+    private Boolean buildSegment(String cubeName, long startDate, long endDate) throws Exception {
+        return buildSegment(cubeName, startDate, endDate, false);
+    }
+
+    private boolean checkJobState() throws Exception {
+        List<String> jobIds = jobService.getAllJobIdsInCache();
+        while (true) {
+            if (jobIds.size() == 0) {
+                return true;
+            }
+            for (int i = jobIds.size() - 1; i >= 0; i--) {
+                String jobId = jobIds.get(i);
+                Output job = jobService.getOutputDigest(jobId);
+                if (job.getState() == ExecutableState.ERROR) {
+                    return false;
+                } else if (job.getState() == ExecutableState.SUCCEED) {
+                    String checkActionName = jobCheckActionMap.get(jobId);
+                    CubeSegment jobSegment = jobSegmentMap.get(jobId);
+                    if (checkActionName != null) {
+                        Method checkAction = this.getClass().getDeclaredMethod(checkActionName, CubeSegment.class);
+                        checkAction.invoke(this, jobSegment);
+                        jobCheckActionMap.remove(jobId);
+                        jobSegmentMap.remove(jobId);
+                    }
+                    jobIds.remove(i);
+                }
+            }
+            try {
+                Thread.sleep(5000);
+            } catch (InterruptedException e) {
+                e.printStackTrace();
+            }
+        }
+    }
+
+    private Set<Long> mockRecommendCuboids(CubeInstance cubeInstance, double maxRatio, int maxNumber) {
+        Preconditions.checkArgument(maxRatio > 0.0 && maxRatio < 1.0);
+        Preconditions.checkArgument(maxNumber > 0);
+        Set<Long> cuboidsRecommend;
+        Random rnd = new Random();
+
+        // add some mandatory cuboids which are for other unit test
+        // - org.apache.kylin.query.ITCombinationTest.testLimitEnabled
+        // - org.apache.kylin.query.ITFailfastQueryTest.testPartitionNotExceedMaxScanBytes
+        // - org.apache.kylin.query.ITFailfastQueryTest.testQueryNotExceedMaxScanBytes
+        List<Set<String>> mandatoryDimensionSetList = Lists.newLinkedList();
+        mandatoryDimensionSetList.add(Sets.newHashSet("CAL_DT"));
+        mandatoryDimensionSetList.add(Sets.newHashSet("seller_id", "CAL_DT"));
+        mandatoryDimensionSetList.add(Sets.newHashSet("LSTG_FORMAT_NAME", "slr_segment_cd"));
+        Set<Long> mandatoryCuboids = cubeInstance.getDescriptor().generateMandatoryCuboids(mandatoryDimensionSetList);
+
+        CuboidScheduler cuboidScheduler = cubeInstance.getCuboidScheduler();
+        Set<Long> cuboidsCurrent = cuboidScheduler.getAllCuboidIds();
+        long baseCuboid = cuboidScheduler.getBaseCuboidId();
+        do {
+            cuboidsRecommend = Sets.newHashSet();
+            cuboidsRecommend.add(baseCuboid);
+            cuboidsRecommend.addAll(mandatoryCuboids);
+            for (long i = 1; i < baseCuboid; i++) {
+                if (rnd.nextDouble() < maxRatio) { // add 5% cuboids
+                    cuboidsRecommend.add(i);
+                }
+                if (cuboidsRecommend.size() > maxNumber) {
+                    break;
+                }
+            }
+        } while (cuboidsRecommend.equals(cuboidsCurrent));
+
+        return cuboidsRecommend;
     }
 
     @SuppressWarnings("unused")
@@ -418,11 +528,12 @@ public class BuildCubeWithEngine {
         return 0;
     }
 
+    @SuppressWarnings("unused")
     private void checkHFilesInHBase(CubeSegment segment) throws IOException {
-        Configuration conf = HBaseConfiguration.create(HadoopUtil.getCurrentConfiguration());
-        String tableName = segment.getStorageLocationIdentifier();
-        try (HTable table = new HTable(conf, tableName)) {
-            HBaseRegionSizeCalculator cal = new HBaseRegionSizeCalculator(table);
+        try (Connection conn = HBaseConnection.get(KylinConfig.getInstanceFromEnv().getStorageUrl())) {
+            String tableName = segment.getStorageLocationIdentifier();
+
+            HBaseRegionSizeCalculator cal = new HBaseRegionSizeCalculator(tableName, conn);
             Map<byte[], Long> sizeMap = cal.getRegionSizeMap();
             long totalSize = 0;
             for (Long size : sizeMap.values()) {
@@ -449,4 +560,58 @@ public class BuildCubeWithEngine {
         }
     }
 
+    private void checkEmptySegRangeInfo(CubeSegment segment) {
+        if (segment != null) {
+            segment = cubeManager.getCube(segment.getCubeDesc().getName()).getSegmentById(segment.getUuid());
+            for (String colId : segment.getDimensionRangeInfoMap().keySet()) {
+                DimensionRangeInfo range = segment.getDimensionRangeInfoMap().get(colId);
+                if (!(range.getMax() == null && range.getMin() == null)) {
+                    throw new RuntimeException("Empty segment must have null info.");
+                }
+            }
+        }
+    }
+
+    private void checkEmptySegRangeInfo(CubeInstance cube) {
+        CubeSegment segment = getLastModifiedSegment(cube);
+        checkEmptySegRangeInfo(segment);
+    }
+
+    private void checkNormalSegRangeInfo(CubeSegment segment) throws IOException {
+        if (segment != null && segment.getModel().getPartitionDesc().isPartitioned()) {
+            segment = cubeManager.getCube(segment.getCubeDesc().getName()).getSegmentById(segment.getUuid());
+            TblColRef colRef = segment.getModel().getPartitionDesc().getPartitionDateColumnRef();
+            DimensionRangeInfo dmRangeInfo = segment.getDimensionRangeInfoMap().get(colRef.getIdentity());
+            if (dmRangeInfo != null) {
+                long min_v = DateFormat.stringToMillis(dmRangeInfo.getMin());
+                long max_v = DateFormat.stringToMillis(dmRangeInfo.getMax());
+                long ts_range_start = segment.getTSRange().start.v;
+                long ts_range_end = segment.getTSRange().end.v;
+                if (!(ts_range_start <= min_v && max_v <= ts_range_end - 1)) {
+                    throw new RuntimeException(String.format(Locale.ROOT,
+                            "Build cube failed, wrong partition column min/max value."
+                                    + " Segment: %s, min value: %s, TsRange.start: %s, max value: %s, TsRange.end: %s",
+                            segment, min_v, ts_range_start, max_v, ts_range_end));
+                }
+            }
+        }
+    }
+
+    private void checkNormalSegRangeInfo(CubeInstance cube) throws IOException {
+        CubeSegment segment = getLastModifiedSegment(cube);
+        checkNormalSegRangeInfo(segment);
+    }
+
+    private CubeSegment getLastModifiedSegment(CubeInstance cube) {
+        Segments segments = cube.getSegments();
+        if (segments.size() > 0) {
+            return Collections.max(segments, new Comparator<CubeSegment>() {
+                @Override
+                public int compare(CubeSegment o1, CubeSegment o2) {
+                    return Long.compare(o1.getLastBuildTime(), o2.getLastBuildTime());
+                }
+            });
+        }
+        return null;
+    }
 }

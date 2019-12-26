@@ -18,7 +18,15 @@
 
 package org.apache.kylin.rest.controller;
 
+import java.io.IOException;
+import java.io.UnsupportedEncodingException;
+
+import org.apache.commons.configuration.ConfigurationException;
 import org.apache.kylin.common.KylinConfig;
+import org.apache.kylin.common.KylinVersion;
+import org.apache.kylin.common.util.VersionUtil;
+import org.apache.kylin.rest.msg.Message;
+import org.apache.kylin.rest.msg.MsgPicker;
 import org.apache.kylin.rest.request.MetricsRequest;
 import org.apache.kylin.rest.request.UpdateConfigRequest;
 import org.apache.kylin.rest.response.GeneralResponse;
@@ -26,6 +34,7 @@ import org.apache.kylin.rest.response.MetricsResponse;
 import org.apache.kylin.rest.service.AdminService;
 import org.apache.kylin.rest.service.CubeService;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Controller;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -35,55 +44,83 @@ import org.springframework.web.bind.annotation.ResponseBody;
 /**
  * Admin Controller is defined as Restful API entrance for UI.
  * 
- * @author jianliu
- * 
  */
 @Controller
 @RequestMapping(value = "/admin")
 public class AdminController extends BasicController {
 
     @Autowired
+    @Qualifier("adminService")
     private AdminService adminService;
+
     @Autowired
+    @Qualifier("cubeMgmtService")
     private CubeService cubeMgmtService;
 
-    @RequestMapping(value = "/env", method = { RequestMethod.GET })
+    @RequestMapping(value = "/env", method = { RequestMethod.GET }, produces = { "application/json" })
     @ResponseBody
     public GeneralResponse getEnv() {
-        String env = adminService.getEnv();
+        Message msg = MsgPicker.getMsg();
+        try {
+            String env = adminService.getEnv();
 
-        GeneralResponse envRes = new GeneralResponse();
-        envRes.put("env", env);
+            GeneralResponse envRes = new GeneralResponse();
+            envRes.put("env", env);
 
-        return envRes;
+            return envRes;
+        } catch (ConfigurationException | UnsupportedEncodingException e) {
+            throw new RuntimeException(msg.getGET_ENV_CONFIG_FAIL(), e);
+        }
     }
 
-    @RequestMapping(value = "/config", method = { RequestMethod.GET })
+    @RequestMapping(value = "/version", method = { RequestMethod.GET }, produces = { "application/json" })
     @ResponseBody
-    public GeneralResponse getConfig() {
-        String config = adminService.getConfigAsString();
+    public GeneralResponse getKylinVersions() {
+        try {
+            GeneralResponse versionRes = new GeneralResponse();
+            String commitId = KylinVersion.getGitCommitInfo();
+            versionRes.put("kylin.version", VersionUtil.getKylinVersion());
+            versionRes.put("kylin.version.commitId", commitId.replace(";", ""));
+            return versionRes;
+        } catch (Exception e) {
+            throw new RuntimeException(e.getMessage(), e);
+        }
+    }
 
+    @RequestMapping(value = "/config", method = { RequestMethod.GET }, produces = { "application/json" })
+    @ResponseBody
+    public GeneralResponse getConfig() throws IOException {
+        String config = KylinConfig.getInstanceFromEnv().exportAllToString();
         GeneralResponse configRes = new GeneralResponse();
         configRes.put("config", config);
 
         return configRes;
     }
 
-    @RequestMapping(value = "/metrics/cubes", method = { RequestMethod.GET })
+    @RequestMapping(value = "/public_config", method = { RequestMethod.GET }, produces = { "application/json" })
+    @ResponseBody
+    public GeneralResponse getPublicConfig() throws IOException {
+        final String config = adminService.getPublicConfig();
+        GeneralResponse configRes = new GeneralResponse();
+        configRes.put("config", config);
+        return configRes;
+    }
+
+    @RequestMapping(value = "/metrics/cubes", method = { RequestMethod.GET }, produces = { "application/json" })
     @ResponseBody
     public MetricsResponse cubeMetrics(MetricsRequest request) {
         return cubeMgmtService.calculateMetrics(request);
     }
 
-    @RequestMapping(value = "/storage", method = { RequestMethod.DELETE })
+    @RequestMapping(value = "/storage", method = { RequestMethod.DELETE }, produces = { "application/json" })
     @ResponseBody
     public void cleanupStorage() {
         adminService.cleanupStorage();
     }
 
-    @RequestMapping(value = "/config", method = { RequestMethod.PUT })
+    @RequestMapping(value = "/config", method = { RequestMethod.PUT }, produces = { "application/json" })
     public void updateKylinConfig(@RequestBody UpdateConfigRequest updateConfigRequest) {
-        KylinConfig.getInstanceFromEnv().setProperty(updateConfigRequest.getKey(), updateConfigRequest.getValue());
+        adminService.updateConfig(updateConfigRequest.getKey(), updateConfigRequest.getValue());
     }
 
     public void setAdminService(AdminService adminService) {

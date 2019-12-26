@@ -17,42 +17,50 @@
  limitations under the License.
 -->
 
-<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
+
     <artifactId>kylin-jdbc</artifactId>
     <packaging>jar</packaging>
-    <name>Kylin:JDBC</name>
+    <name>Apache Kylin - JDBC Driver</name>
     <description>Kylin JDBC Driver on Calcite Avatica</description>
 
     <parent>
         <groupId>org.apache.kylin</groupId>
         <artifactId>kylin</artifactId>
-        <version>1.5.4-SNAPSHOT</version>
-
+        <version>3.0.0-SNAPSHOT</version>
     </parent>
 
     <properties>
-        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <shadeBase>org.apache.kylin.jdbc.shaded</shadeBase>
     </properties>
 
     <dependencies>
         <dependency>
-            <groupId>org.apache.calcite.avatica</groupId>
-            <artifactId>avatica</artifactId>
-        </dependency>
-        <dependency>
             <groupId>org.apache.httpcomponents</groupId>
             <artifactId>httpclient</artifactId>
+            <optional>true</optional>
         </dependency>
         <dependency>
-            <groupId>org.slf4j</groupId>
-            <artifactId>slf4j-api</artifactId>
+            <groupId>org.apache.calcite.avatica</groupId>
+            <artifactId>avatica-core</artifactId>
+            <optional>true</optional>
         </dependency>
+        <dependency>
+            <groupId>com.google.guava</groupId>
+            <artifactId>guava</artifactId>
+            <optional>true</optional>
+        </dependency>
+
         <dependency>
             <groupId>junit</groupId>
             <artifactId>junit</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.mockito</groupId>
+            <artifactId>mockito-core</artifactId>
+            <version>${mockito.version}</version>
             <scope>test</scope>
         </dependency>
 
@@ -71,13 +79,13 @@
                         </goals>
                         <configuration>
                             <createDependencyReducedPom>false</createDependencyReducedPom>
+
                             <artifactSet>
-                                <!-- jackson is already packaged into calcite-avatica.jar. To avoid including jackson
-                                twice, we include calcite-avatica which has jackson and exclude jackson. -->
                                 <excludes>
-                                    <exclude>com.fasterxml.jackson.core:*</exclude>
+                                    <exclude>org.slf4j:jcl-over-slf4j:*</exclude>
                                 </excludes>
                             </artifactSet>
+
                             <relocations>
                                 <relocation>
                                     <pattern>org.apache.calcite</pattern>
@@ -88,12 +96,20 @@
                                     <shadedPattern>${shadeBase}.com.fasterxml.jackson</shadedPattern>
                                 </relocation>
                                 <relocation>
+                                    <pattern>com.google.protobuf</pattern>
+                                    <shadedPattern>${shadeBase}.com.google.protobuf</shadedPattern>
+                                </relocation>
+                                <relocation>
                                     <pattern>org.apache.http</pattern>
                                     <shadedPattern>${shadeBase}.org.apache.http</shadedPattern>
                                 </relocation>
                                 <relocation>
                                     <pattern>org.apache.commons</pattern>
                                     <shadedPattern>${shadeBase}.org.apache.commons</shadedPattern>
+                                </relocation>
+                                <relocation>
+                                    <pattern>com.google.common</pattern>
+                                    <shadedPattern>${shadeBase}.com.google.common</shadedPattern>
                                 </relocation>
                             </relocations>
                             <filters>

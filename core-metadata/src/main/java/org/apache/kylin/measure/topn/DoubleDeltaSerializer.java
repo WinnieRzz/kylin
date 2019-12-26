@@ -17,6 +17,8 @@
  */
 package org.apache.kylin.measure.topn;
 
+import org.apache.kylin.common.threadlocal.InternalThreadLocal;
+
 import java.nio.ByteBuffer;
 
 /**
@@ -24,7 +26,7 @@ import java.nio.ByteBuffer;
  * 
  * http://bitcharmer.blogspot.co.uk/2013/12/how-to-serialise-array-of-doubles-with.html
  */
-public class DoubleDeltaSerializer {
+public class DoubleDeltaSerializer implements java.io.Serializable {
 
     // first 32 bits stores meta info
     static final int PRECISION_BITS = 3;
@@ -32,7 +34,7 @@ public class DoubleDeltaSerializer {
     static final int LENGTH_BITS = 23;
 
     static final long[] MASKS = new long[64];
-    {
+    static {
         for (int i = 0; i < MASKS.length; i++) {
             MASKS[i] = (1L << i) - 1;
         }
@@ -41,7 +43,7 @@ public class DoubleDeltaSerializer {
     final private int precision;
     final private int multiplier;
 
-    transient ThreadLocal<long[]> deltasThreadLocal;
+    transient InternalThreadLocal<long[]> deltasThreadLocal;
 
     public DoubleDeltaSerializer() {
         this(2);
@@ -55,7 +57,6 @@ public class DoubleDeltaSerializer {
 
         this.precision = precision;
         this.multiplier = (int) Math.pow(10, precision);
-        this.deltasThreadLocal = new ThreadLocal<long[]>();
     }
 
     public void serialize(double[] values, ByteBuffer buf) {
@@ -111,6 +112,10 @@ public class DoubleDeltaSerializer {
     private long[] calculateDeltas(double[] values) {
         int len = values.length - 1;
         len = Math.max(0, len);
+
+        if (deltasThreadLocal == null) {
+            deltasThreadLocal = new InternalThreadLocal<>();
+        }
 
         long[] deltas = deltasThreadLocal.get();
         if (deltas == null || deltas.length < len) {

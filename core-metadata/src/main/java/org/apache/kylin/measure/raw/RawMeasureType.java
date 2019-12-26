@@ -46,6 +46,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 public class RawMeasureType extends MeasureType<List<ByteArray>> {
+    private static final long serialVersionUID = 1L;
 
     private static final Logger logger = LoggerFactory.getLogger(RawMeasureType.class);
 
@@ -56,7 +57,7 @@ public class RawMeasureType extends MeasureType<List<ByteArray>> {
 
         @Override
         public MeasureType<List<ByteArray>> createMeasureType(String funcName, DataType dataType) {
-            return new RawMeasureType(funcName, dataType);
+            return new RawMeasureType();
         }
 
         @Override
@@ -75,10 +76,7 @@ public class RawMeasureType extends MeasureType<List<ByteArray>> {
         }
     }
 
-    private final DataType dataType;
-
-    public RawMeasureType(String funcName, DataType dataType) {
-        this.dataType = dataType;
+    public RawMeasureType() {
     }
 
     public void validate(FunctionDesc functionDesc) throws IllegalArgumentException {
@@ -102,6 +100,8 @@ public class RawMeasureType extends MeasureType<List<ByteArray>> {
     @Override
     public MeasureIngester<List<ByteArray>> newIngester() {
         return new MeasureIngester<List<ByteArray>>() {
+            private static final long serialVersionUID = 1L;
+
             //encode measure value to dictionary
             @Override
             public List<ByteArray> valueOf(String[] values, MeasureDesc measureDesc, Map<TblColRef, Dictionary<String>> dictionaryMap) {
@@ -123,6 +123,11 @@ public class RawMeasureType extends MeasureType<List<ByteArray>> {
                 return valueList;
             }
 
+            @Override
+            public void reset() {
+
+            }
+
             //merge measure dictionary
             @Override
             public List<ByteArray> reEncodeDictionary(List<ByteArray> value, MeasureDesc measureDesc, Map<TblColRef, Dictionary<String>> oldDicts, Map<TblColRef, Dictionary<String>> newDicts) {
@@ -132,20 +137,19 @@ public class RawMeasureType extends MeasureType<List<ByteArray>> {
 
                 int valueSize = value.size();
                 byte[] newIdBuf = new byte[valueSize * mergedDict.getSizeOfId()];
-                byte[] literal = new byte[sourceDict.getSizeOfValue()];
 
                 int bufOffset = 0;
                 for (ByteArray c : value) {
                     int oldId = BytesUtil.readUnsigned(c.array(), c.offset(), c.length());
                     int newId;
-                    int size = sourceDict.getValueBytesFromId(oldId, literal, 0);
-                    if (size < 0) {
+                    String v = sourceDict.getValueFromId(oldId);
+                    if (v == null) {
                         newId = mergedDict.nullId();
                     } else {
-                        newId = mergedDict.getIdFromValueBytes(literal, 0, size);
+                        newId = mergedDict.getIdFromValue(v);
                     }
                     BytesUtil.writeUnsigned(newId, newIdBuf, bufOffset, mergedDict.getSizeOfId());
-                    c.set(newIdBuf, bufOffset, mergedDict.getSizeOfId());
+                    c.reset(newIdBuf, bufOffset, mergedDict.getSizeOfId());
                     bufOffset += mergedDict.getSizeOfId();
                 }
                 return value;
@@ -164,9 +168,9 @@ public class RawMeasureType extends MeasureType<List<ByteArray>> {
         return Collections.singletonList(literalCol);
     }
 
-    public CapabilityResult.CapabilityInfluence influenceCapabilityCheck(Collection<TblColRef> unmatchedDimensions, Collection<FunctionDesc> unmatchedAggregations, SQLDigest digest, MeasureDesc measureDesc) {
+    public CapabilityResult.CapabilityInfluence influenceCapabilityCheck(Collection<TblColRef> unmatchedDimensions, Collection<FunctionDesc> unmatchedAggregations, SQLDigest digest, final MeasureDesc measureDesc) {
         //is raw query
-        if (!digest.isRawQuery())
+        if (!digest.isRawQuery)
             return null;
 
         TblColRef rawColumn = getRawColumn(measureDesc.getFunction());
@@ -182,6 +186,11 @@ public class RawMeasureType extends MeasureType<List<ByteArray>> {
             public double suggestCostMultiplier() {
                 return 0.9;
             }
+
+            @Override
+            public MeasureDesc getInvolvedMeasure() {
+                return measureDesc;
+            }
         };
     }
 
@@ -191,32 +200,27 @@ public class RawMeasureType extends MeasureType<List<ByteArray>> {
     }
 
     @Override
-    public Class<?> getRewriteCalciteAggrFunctionClass() {
-        return null;
-    }
+    public void adjustSqlDigest(List<MeasureDesc> measureDescs, SQLDigest sqlDigest) {
 
-    @Override
-    public void adjustSqlDigest(MeasureDesc measureDesc, SQLDigest sqlDigest) {
-        if (sqlDigest.isRawQuery()) {
-            TblColRef col = this.getRawColumn(measureDesc.getFunction());
-            ParameterDesc colParameter = new ParameterDesc();
-            colParameter.setType("column");
-            colParameter.setValue(col.getName());
-            FunctionDesc rawFunc = new FunctionDesc();
-            rawFunc.setExpression("RAW");
-            rawFunc.setParameter(colParameter);
-
-            if (sqlDigest.allColumns.contains(col)) {
-                if (measureDesc.getFunction().equals(rawFunc)) {
-                    FunctionDesc sumFunc = new FunctionDesc();
-                    sumFunc.setExpression("SUM");
-                    sumFunc.setParameter(colParameter);
-                    sqlDigest.aggregations.remove(sumFunc);
-                    sqlDigest.aggregations.add(rawFunc);
-                    logger.info("Add RAW measure on column " + col);
+        if (sqlDigest.isRawQuery) {
+            for (MeasureDesc measureDesc : measureDescs) {
+                if (!sqlDigest.involvedMeasure.contains(measureDesc)) {
+                    continue;
                 }
-                if (!sqlDigest.metricColumns.contains(col)) {
-                    sqlDigest.metricColumns.add(col);
+                TblColRef col = this.getRawColumn(measureDesc.getFunction());
+                ParameterDesc colParameter = ParameterDesc.newInstance(col);
+                FunctionDesc rawFunc = FunctionDesc.newInstance("RAW", colParameter, null);
+
+                if (sqlDigest.allColumns.contains(col)) {
+                    if (measureDesc.getFunction().equals(rawFunc)) {
+                        FunctionDesc sumFunc = FunctionDesc.newInstance("SUM", colParameter, null);
+                        sqlDigest.aggregations.remove(sumFunc);
+                        sqlDigest.aggregations.add(rawFunc);
+                        logger.info("Add RAW measure on column " + col);
+                    }
+                    if (!sqlDigest.metricColumns.contains(col)) {
+                        sqlDigest.metricColumns.add(col);
+                    }
                 }
             }
         }

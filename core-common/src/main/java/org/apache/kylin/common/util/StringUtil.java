@@ -21,11 +21,20 @@ package org.apache.kylin.common.util;
 import java.util.ArrayList;
 import java.util.Collection;
 
+import java.util.Iterator;
+import java.util.Locale;
+
+import com.google.common.base.Splitter;
+import com.google.common.collect.Iterables;
 import org.apache.commons.lang.StringUtils;
 
 /**
  */
 public class StringUtil {
+
+    private StringUtil() {
+        throw new IllegalStateException("Class StringUtil is an utility class !");
+    }
 
     public static String[] filterSystemArgs(String[] args) {
         ArrayList<String> whatsLeft = new ArrayList<String>();
@@ -49,21 +58,58 @@ public class StringUtil {
         return (String[]) whatsLeft.toArray(new String[whatsLeft.size()]);
     }
 
-    public static String join(Iterable<String> parts, String separator) {
-        StringBuilder buf = new StringBuilder();
-        for (String p : parts) {
-            if (buf.length() > 0)
-                buf.append(separator);
-            buf.append(p);
+    /**
+     * Returns a substring by removing the specified suffix. If the given string
+     * does not ends with the suffix, the string is returned without change.
+     * 
+     * @param str
+     * @param suffix
+     * @return
+     */
+    public static String trimSuffix(String str, String suffix) {
+        if (str.endsWith(suffix)) {
+            return str.substring(0, str.length() - suffix.length());
+        } else {
+            return str;
         }
-        return buf.toString();
+    }
+
+    public static String join(Iterable<String> parts, String separator) {
+        if (parts == null) {
+            return null;
+        }
+
+        Iterator<String> iterator = parts.iterator();
+
+        if (iterator == null) {
+            return null;
+        } else if (!iterator.hasNext()) {
+            return "";
+        } else {
+            StringBuilder buf = new StringBuilder();
+            final String first = iterator.next();
+            if (first != null) {
+                buf.append(first);
+            }
+            while (iterator.hasNext()) {
+                if (separator != null) {
+                    buf.append(separator);
+                }
+                final String part = iterator.next();
+                if (part != null) {
+                    buf.append(part);
+                }
+            }
+
+            return buf.toString();
+        }
     }
 
     public static void toUpperCaseArray(String[] source, String[] target) {
         if (source != null) {
             for (int i = 0; i < source.length; i++) {
                 if (source[i] != null) {
-                    target[i] = source[i].toUpperCase();
+                    target[i] = source[i].toUpperCase(Locale.ROOT);
                 }
             }
         }
@@ -122,6 +168,56 @@ public class StringUtil {
         String[] result = new String[endExclusive - start];
         System.arraycopy(array, start, result, 0, endExclusive - start);
         return result;
+    }
+
+    public static void appendWithSeparator(StringBuilder src, String append) {
+        if (src == null) {
+            throw new IllegalArgumentException();
+        }
+        if (src.length() > 0 && src.toString().endsWith(",") == false) {
+            src.append(",");
+        }
+
+        if (StringUtils.isBlank(append) == false) {
+            src.append(append);
+        }
+    }
+
+    public static String[] splitAndTrim(String str, String splitBy) {
+        Splitter splitterWithTrim = Splitter.on(splitBy).trimResults().omitEmptyStrings();
+
+        return Iterables.toArray(splitterWithTrim.split(str), String.class);
+    }
+
+    public static String[] split(String str, String splitBy) {
+        return Iterables.toArray(Splitter.on(splitBy).split(str), String.class);
+    }
+
+    public static String[] splitByComma(String str) {
+        return split(str, ",");
+    }
+
+    // calculating length in UTF-8 of Java String without actually encoding it
+    public static int utf8Length(CharSequence sequence) {
+        int count = 0;
+        for (int i = 0, len = sequence.length(); i < len; i++) {
+            char ch = sequence.charAt(i);
+            if (ch <= 0x7F) {
+                count++;
+            } else if (ch <= 0x7FF) {
+                count += 2;
+            } else if (Character.isHighSurrogate(ch)) {
+                count += 4;
+                ++i;
+            } else {
+                count += 3;
+            }
+        }
+        return count;
+    }
+
+    public static boolean equals(String a, String b) {
+        return a == null ? b == null : a.equals(b);
     }
 
 }

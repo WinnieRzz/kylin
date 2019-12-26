@@ -29,6 +29,7 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
 
 import org.apache.commons.io.IOUtils;
 import org.slf4j.LoggerFactory;
@@ -41,6 +42,7 @@ import com.jcraft.jsch.Session;
 
 public class SSHClient {
     protected static final org.slf4j.Logger logger = LoggerFactory.getLogger(SSHClient.class);
+    private static final String ERROR_IN_CHECK_ACK = "Error in checkAck()";
 
     private String hostname;
     private int port;
@@ -64,7 +66,7 @@ public class SSHClient {
     public void scpFileToRemote(String localFile, String remoteTargetDirectory) throws Exception {
         FileInputStream fis = null;
         try {
-            System.out.println("SCP file " + localFile + " to " + remoteTargetDirectory);
+            logger.info("SCP file " + localFile + " to " + remoteTargetDirectory);
 
             Session session = newJSchSession();
             session.connect();
@@ -93,10 +95,10 @@ public class SSHClient {
                 // The access time should be sent here,
                 // but it is not accessible with JavaAPI ;-<
                 command += (" " + (_lfile.lastModified() / 1000) + " 0\n");
-                out.write(command.getBytes());
+                out.write(command.getBytes(StandardCharsets.UTF_8));
                 out.flush();
                 if (checkAck(in) != 0) {
-                    throw new Exception("Error in checkAck()");
+                    throw new Exception(ERROR_IN_CHECK_ACK);
                 }
             }
 
@@ -111,10 +113,10 @@ public class SSHClient {
                 command += localFile;
             }
             command += "\n";
-            out.write(command.getBytes());
+            out.write(command.getBytes(StandardCharsets.UTF_8));
             out.flush();
             if (checkAck(in) != 0) {
-                throw new Exception("Error in checkAck()");
+                throw new Exception(ERROR_IN_CHECK_ACK);
             }
 
             // send a content of lfile
@@ -133,7 +135,7 @@ public class SSHClient {
             out.write(buf, 0, 1);
             out.flush();
             if (checkAck(in) != 0) {
-                throw new Exception("Error in checkAck()");
+                throw new Exception(ERROR_IN_CHECK_ACK);
             }
             out.close();
 
@@ -149,7 +151,7 @@ public class SSHClient {
     public void scpFileToLocal(String rfile, String lfile) throws Exception {
         FileOutputStream fos = null;
         try {
-            System.out.println("SCP remote file " + rfile + " to local " + lfile);
+            logger.info("SCP remote file " + rfile + " to local " + lfile);
 
             String prefix = null;
             if (new File(lfile).isDirectory()) {
@@ -200,12 +202,10 @@ public class SSHClient {
                 for (int i = 0;; i++) {
                     in.read(buf, i, 1);
                     if (buf[i] == (byte) 0x0a) {
-                        file = new String(buf, 0, i);
+                        file = new String(buf, 0, i, StandardCharsets.UTF_8);
                         break;
                     }
                 }
-
-                //System.out.println("filesize="+filesize+", file="+file);
 
                 // send '\0'
                 buf[0] = 0;
@@ -259,7 +259,7 @@ public class SSHClient {
 
     public SSHClientOutput execCommand(String command, int timeoutSeconds, Logger logAppender) throws Exception {
         try {
-            System.out.println("[" + username + "@" + hostname + "] Execute command: " + command);
+            logger.info("[" + username + "@" + hostname + "] Execute command: " + command);
 
             StringBuffer text = new StringBuffer();
             int exitCode = -1;
@@ -290,7 +290,7 @@ public class SSHClient {
                     if (i < 0)
                         break;
 
-                    String line = new String(tmp, 0, i);
+                    String line = new String(tmp, 0, i, StandardCharsets.UTF_8);
                     text.append(line);
                     if (logAppender != null) {
                         logAppender.log(line);
@@ -301,7 +301,7 @@ public class SSHClient {
                     if (i < 0)
                         break;
 
-                    String line = new String(tmp, 0, i);
+                    String line = new String(tmp, 0, i, StandardCharsets.UTF_8);
                     text.append(line);
                     if (logAppender != null) {
                         logAppender.log(line);
@@ -311,7 +311,7 @@ public class SSHClient {
                     if (in.available() > 0)
                         continue;
                     exitCode = channel.getExitStatus();
-                    System.out.println("[" + username + "@" + hostname + "] Command exit-status: " + exitCode);
+                    logger.info("[" + username + "@" + hostname + "] Command exit-status: " + exitCode);
 
                     break;
                 }
@@ -364,10 +364,10 @@ public class SSHClient {
                 sb.append((char) c);
             } while (c != '\n');
             if (b == 1) { // error
-                System.out.print(sb.toString());
+                logger.error(sb.toString());
             }
             if (b == 2) { // fatal error
-                System.out.print(sb.toString());
+                logger.error(sb.toString());
             }
         }
         return b;

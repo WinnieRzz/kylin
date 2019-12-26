@@ -19,53 +19,45 @@
 package org.apache.kylin.common.util;
 
 import java.io.File;
-import java.io.FileInputStream;
-import java.io.FileOutputStream;
 import java.io.IOException;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipOutputStream;
+import java.util.Locale;
 
-import org.apache.commons.io.IOUtils;
+import org.apache.commons.compress.archivers.ArchiveException;
+import org.apache.commons.compress.archivers.ArchiveStreamFactory;
+import org.apache.commons.compress.archivers.examples.Archiver;
+import org.apache.commons.compress.archivers.examples.Expander;
+import org.apache.commons.compress.archivers.zip.ZipFile;
 import org.apache.commons.lang.StringUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 public class ZipFileUtils {
-    public static void compressZipFile(String sourceDir, String zipFilename) throws IOException {
-        if (!validateZipFilename(zipFilename)) {
-            throw new RuntimeException("Zipfile must end with .zip");
-        }
-        ZipOutputStream zipFile = new ZipOutputStream(new FileOutputStream(zipFilename));
-        compressDirectoryToZipfile(normDir(new File(sourceDir).getParent()), normDir(sourceDir), zipFile);
-        IOUtils.closeQuietly(zipFile);
+
+    private static final Logger logger = LoggerFactory.getLogger(ZipFileUtils.class);
+
+    private ZipFileUtils() {
+        throw new IllegalStateException("Class ZipFileUtils is an utility class !");
     }
 
-    private static void compressDirectoryToZipfile(String rootDir, String sourceDir, ZipOutputStream out) throws IOException {
-        for (File sourceFile : new File(sourceDir).listFiles()) {
-            if (sourceFile.isDirectory()) {
-                compressDirectoryToZipfile(rootDir, sourceDir + normDir(sourceFile.getName()), out);
-            } else {
-                ZipEntry entry = new ZipEntry(normDir(StringUtils.isEmpty(rootDir) ? sourceDir : sourceDir.replace(rootDir, "")) + sourceFile.getName());
-                entry.setTime(sourceFile.lastModified());
-                out.putNextEntry(entry);
-
-                FileInputStream in = new FileInputStream(sourceDir + sourceFile.getName());
-                IOUtils.copy(in, out);
-                IOUtils.closeQuietly(in);
-            }
+    public static void compressZipFile(String sourceDir, String zipFileName) throws IOException, ArchiveException {
+        if (!validateZipFilename(zipFileName)) {
+            throw new RuntimeException("Zip file must end with .zip");
         }
+        Archiver archiver = new Archiver();
+        archiver.create(ArchiveStreamFactory.ZIP, new File(zipFileName), new File(sourceDir));
+    }
+
+    public static void decompressZipfileToDirectory(String zipFileName, File outputFolder)
+            throws IOException, ArchiveException {
+        if (!validateZipFilename(zipFileName)) {
+            throw new RuntimeException("Zip file must end with .zip");
+        }
+        Expander expander = new Expander();
+        ZipFile zipFile = new ZipFile(zipFileName);
+        expander.expand(zipFile, outputFolder);
     }
 
     private static boolean validateZipFilename(String filename) {
-        if (!StringUtils.isEmpty(filename) && filename.trim().toLowerCase().endsWith(".zip")) {
-            return true;
-        }
-
-        return false;
-    }
-
-    private static String normDir(String dirName) {
-        if (!StringUtils.isEmpty(dirName) && !dirName.endsWith(File.separator)) {
-            dirName = dirName + File.separator;
-        }
-        return dirName;
+        return !StringUtils.isEmpty(filename) && filename.trim().toLowerCase(Locale.ROOT).endsWith(".zip");
     }
 }

@@ -25,18 +25,18 @@ import java.nio.ByteBuffer;
 import org.apache.kylin.common.util.ImmutableBitSet;
 import org.apache.kylin.cube.CubeSegment;
 import org.apache.kylin.cube.cuboid.Cuboid;
-import org.apache.kylin.cube.inmemcubing.ICuboidWriter;
+import org.apache.kylin.cube.inmemcubing.ICuboidGTTableWriter;
 import org.apache.kylin.cube.kv.AbstractRowKeyEncoder;
 import org.apache.kylin.cube.model.CubeDesc;
 import org.apache.kylin.engine.mr.ByteArrayWritable;
 import org.apache.kylin.gridtable.GTRecord;
-import org.apache.kylin.measure.BufferedMeasureEncoder;
+import org.apache.kylin.measure.BufferedMeasureCodec;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
  */
-public abstract class KVGTRecordWriter implements ICuboidWriter {
+public abstract class KVGTRecordWriter extends ICuboidGTTableWriter {
 
     private static final Logger logger = LoggerFactory.getLogger(KVGTRecordWriter.class);
 
@@ -49,7 +49,7 @@ public abstract class KVGTRecordWriter implements ICuboidWriter {
     private int measureCount;
     private byte[] keyBuf;
     private ImmutableBitSet measureColumns;
-    private ByteBuffer valueBuf = ByteBuffer.allocate(BufferedMeasureEncoder.DEFAULT_BUFFER_SIZE);
+    private ByteBuffer valueBuf = ByteBuffer.allocate(BufferedMeasureCodec.DEFAULT_BUFFER_SIZE);
     private ByteArrayWritable outputKey = new ByteArrayWritable();
     private ByteArrayWritable outputValue = new ByteArrayWritable();
     private long cuboidRowCount = 0;
@@ -95,7 +95,7 @@ public abstract class KVGTRecordWriter implements ICuboidWriter {
     protected abstract void writeAsKeyValue(ByteArrayWritable key, ByteArrayWritable value) throws IOException;
 
     private void initVariables(Long cuboidId) {
-        rowKeyEncoder = AbstractRowKeyEncoder.createInstance(cubeSegment, Cuboid.findById(cubeDesc, cuboidId));
+        rowKeyEncoder = AbstractRowKeyEncoder.createInstance(cubeSegment, Cuboid.findForMandatory(cubeDesc, cuboidId));
         keyBuf = rowKeyEncoder.createBuf();
 
         dimensions = Long.bitCount(cuboidId);

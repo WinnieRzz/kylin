@@ -18,14 +18,15 @@
 
 package org.apache.kylin.common.util;
 
-import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.text.DateFormat;
 import java.text.SimpleDateFormat;
-import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Calendar;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
+import java.util.TimeZone;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -33,6 +34,9 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
+import org.apache.commons.lang.StringUtils;
+import org.apache.commons.lang3.time.FastDateFormat;
+import org.junit.Assert;
 import org.junit.Ignore;
 import org.junit.Test;
 import org.slf4j.LoggerFactory;
@@ -49,36 +53,20 @@ import com.google.common.collect.Maps;
 @SuppressWarnings("unused")
 public class BasicTest {
     protected static final org.slf4j.Logger logger = LoggerFactory.getLogger(BasicTest.class);
-
-    private void log(ByteBuffer a) {
-        Integer x = 4;
-        foo(x);
-    }
-
-    private void foo(Long a) {
-        System.out.printf("a");
-    }
-
-    private void foo(Integer b) {
-        System.out.printf("b");
-    }
-
-    private enum MetricType {
-        Count, DimensionAsMetric, DistinctCount, Normal
-    }
-
     public static int counter = 1;
 
-    class X {
-        byte[] mm = new byte[100];
-
-        public X() {
-            counter++;
-        }
+    private static String time(long t) {
+        DateFormat dateFormat = new SimpleDateFormat("yyyy/MM/dd HH:mm:ss", Locale.ROOT);
+        Calendar cal = Calendar.getInstance(TimeZone.getDefault(), Locale.ROOT);
+        cal.setTimeInMillis(t);
+        return dateFormat.format(cal.getTime());
     }
 
     @Test
     public void testxx() throws InterruptedException {
+        System.out.println(
+                "((?<![\\p{L}_0-9\\.\\\"])(\\\"[\\p{L}_0-9]+\\\"\\.)?(\\\"[\\p{L}_0-9]+\\\")(?![\\p{L}_0-9\\.\\\"]))");
+        System.out.println(0x8fL);
         byte[] space = new byte[100];
         ByteBuffer buffer = ByteBuffer.wrap(space, 10, 20);
         buffer.put((byte) 1);
@@ -154,13 +142,14 @@ public class BasicTest {
     }
 
     @Test
-    @Ignore("convenient trial tool for dev")
     public void test1() throws Exception {
 
         System.out.println(org.apache.kylin.common.util.DateFormat.formatToTimeStr(1433833611000L));
         System.out.println(org.apache.kylin.common.util.DateFormat.formatToTimeStr(1433250517000L));
         System.out.println(org.apache.kylin.common.util.DateFormat.stringToMillis("2015-06-01 00:00:00"));
         System.out.println(org.apache.kylin.common.util.DateFormat.stringToMillis("2015-05-15 17:00:00"));
+        Assert.assertEquals(1568960682251L,
+                org.apache.kylin.common.util.DateFormat.stringToMillis("2019-09-20T14:24:42.251+08:00"));
 
         String bb = "\\x00\\x00\\x00\\x00\\x01\\x3F\\xD0\\x2D\\58\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00";//2013/07/12 07:59:37
         String cc = "\\x00\\x00\\x00\\x00\\x01\\x41\\xBE\\x8F\\xD8\\x00\\x00\\x00\\x00\\x00\\x00\\x00";//2013/10/16 08:00:00
@@ -177,9 +166,9 @@ public class BasicTest {
         long current = System.currentTimeMillis();
         System.out.println(time(current));
 
-        Calendar a = Calendar.getInstance();
-        Calendar b = Calendar.getInstance();
-        Calendar c = Calendar.getInstance();
+        Calendar a = Calendar.getInstance(TimeZone.getDefault(), Locale.ROOT);
+        Calendar b = Calendar.getInstance(TimeZone.getDefault(), Locale.ROOT);
+        Calendar c = Calendar.getInstance(TimeZone.getDefault(), Locale.ROOT);
         b.clear();
         c.clear();
 
@@ -187,8 +176,10 @@ public class BasicTest {
         System.out.println(time(c.getTimeInMillis()));
 
         a.setTimeInMillis(current);
-        b.set(a.get(Calendar.YEAR), a.get(Calendar.MONTH), a.get(Calendar.DAY_OF_MONTH), a.get(Calendar.HOUR_OF_DAY), a.get(Calendar.MINUTE));
-        c.set(a.get(Calendar.YEAR), a.get(Calendar.MONTH), a.get(Calendar.DAY_OF_MONTH), a.get(Calendar.HOUR_OF_DAY), 0);
+        b.set(a.get(Calendar.YEAR), a.get(Calendar.MONTH), a.get(Calendar.DAY_OF_MONTH), a.get(Calendar.HOUR_OF_DAY),
+                a.get(Calendar.MINUTE));
+        c.set(a.get(Calendar.YEAR), a.get(Calendar.MONTH), a.get(Calendar.DAY_OF_MONTH), a.get(Calendar.HOUR_OF_DAY),
+                0);
 
         System.out.println(time(b.getTimeInMillis()));
         System.out.println(time(c.getTimeInMillis()));
@@ -196,19 +187,40 @@ public class BasicTest {
     }
 
     @Test
-    @Ignore("fix it later")
-    public void test2() throws IOException {
-        ArrayList<String> x = Lists.newArrayListWithCapacity(10);
-        x.set(2, "dd");
-        for (String y : x) {
-            System.out.println(y);
-        }
+    public void test3() throws Exception {
+        FastDateFormat formatter = org.apache.kylin.common.util.DateFormat.getDateFormat("MM dd, yyyy hh:mm:ss a");
+
+        String timeStr = "07 20, 2016 09:59:17 AM";
+
+        System.out.println(formatter.parse(timeStr).getTime());
     }
 
-    private static String time(long t) {
-        DateFormat dateFormat = new SimpleDateFormat("yyyy/MM/dd HH:mm:ss");
-        Calendar cal = Calendar.getInstance();
-        cal.setTimeInMillis(t);
-        return dateFormat.format(cal.getTime());
+    @Test
+    public void testStringSplit() throws Exception {
+
+        String[] origin = new String[] { "ab,c", "cd|e" };
+
+        // test with sequence file default delimiter
+        String delimiter = "\01"; //"\u001F"; "\t";
+        String concated = StringUtils.join(Arrays.asList(origin), delimiter);
+        System.out.println(concated);
+
+        String[] newValues = concated.split(delimiter);
+        Assert.assertEquals(origin, newValues);
+
+        newValues = concated.split("\\" + delimiter);
+        Assert.assertEquals(origin, newValues);
+    }
+
+    private enum MetricType {
+        Count, DimensionAsMetric, DistinctCount, Normal
+    }
+
+    class X {
+        byte[] mm = new byte[100];
+
+        public X() {
+            counter++;
+        }
     }
 }

@@ -35,7 +35,7 @@ import org.slf4j.LoggerFactory;
 
 import com.google.common.collect.Maps;
 
-public class CubeDimEncMap implements IDimensionEncodingMap {
+public class CubeDimEncMap implements IDimensionEncodingMap, java.io.Serializable {
 
     private static final Logger logger = LoggerFactory.getLogger(CubeDimEncMap.class);
 
@@ -72,7 +72,7 @@ public class CubeDimEncMap implements IDimensionEncodingMap {
                 }
             } else {
                 // normal case
-                result = DimensionEncodingFactory.create(colDesc.getEncodingName(), colDesc.getEncodingArgs());
+                result = DimensionEncodingFactory.create(colDesc.getEncodingName(), colDesc.getEncodingArgs(), colDesc.getEncodingVersion());
             }
             encMap.put(col, result);
         }

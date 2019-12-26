@@ -33,7 +33,7 @@ import org.apache.hive.hcatalog.data.transfer.DataTransferFactory;
 import org.apache.hive.hcatalog.data.transfer.HCatReader;
 import org.apache.hive.hcatalog.data.transfer.ReadEntity;
 import org.apache.hive.hcatalog.data.transfer.ReaderContext;
-import org.apache.kylin.source.ReadableTable.TableReader;
+import org.apache.kylin.source.IReadableTable.TableReader;
 
 /**
  * An implementation of TableReader with HCatalog for Hive table.
@@ -82,9 +82,6 @@ public class HiveTableReader implements TableReader {
         }
 
         this.numberOfSplits = readCntxt.numSplits();
-
-        //        HCatTableInfo tableInfo = HCatTableInfo.
-        //        HCatSchema schema = HCatBaseInputFormat.getTableSchema(context.getConfiguration);
     }
 
     @Override
@@ -129,7 +126,7 @@ public class HiveTableReader implements TableReader {
         String[] arr = new String[record.size()];
         for (int i = 0; i < arr.length; i++) {
             Object o = record.get(i);
-            arr[i] = (o == null) ? null : o.toString();
+            arr[i] = (o == null || "\\N".equals(o)) ? null : o.toString();
         }
         return arr;
     }

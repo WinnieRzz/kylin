@@ -23,17 +23,20 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 
+import java.util.Locale;
 import org.apache.commons.lang.StringUtils;
+import org.apache.hadoop.hbase.HBaseConfiguration;
 import org.apache.hadoop.hbase.HTableDescriptor;
 import org.apache.hadoop.hbase.TableName;
-import org.apache.hadoop.hbase.client.HBaseAdmin;
+import org.apache.hadoop.hbase.client.Admin;
+import org.apache.hadoop.hbase.client.Connection;
+import org.apache.hadoop.hbase.client.ConnectionFactory;
 import org.apache.kylin.common.KylinConfig;
 import org.apache.kylin.cube.CubeInstance;
 import org.apache.kylin.cube.CubeManager;
 import org.apache.kylin.cube.CubeSegment;
 import org.apache.kylin.metadata.model.SegmentStatusEnum;
 import org.apache.kylin.metadata.realization.IRealizationConstants;
-import org.apache.kylin.storage.hbase.HBaseConnection;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -49,15 +52,17 @@ public class UpdateHTableHostCLI {
     private List<String> errorMsgs = Lists.newArrayList();
 
     private List<String> htables;
-    private HBaseAdmin hbaseAdmin;
+    private Admin hbaseAdmin;
     private KylinConfig kylinConfig;
     private String oldHostValue;
 
     public UpdateHTableHostCLI(List<String> htables, String oldHostValue) throws IOException {
         this.htables = htables;
         this.oldHostValue = oldHostValue;
-        this.hbaseAdmin = new HBaseAdmin(HBaseConnection.getCurrentHBaseConfiguration());
-        this.kylinConfig = KylinConfig.getInstanceFromEnv();
+        try (Connection conn = ConnectionFactory.createConnection(HBaseConfiguration.create());) {
+            hbaseAdmin = conn.getAdmin();
+            this.kylinConfig = KylinConfig.getInstanceFromEnv();
+        }
     }
 
     public static void main(String[] args) throws Exception {
@@ -66,11 +71,11 @@ public class UpdateHTableHostCLI {
         }
 
         List<String> tableNames = getHTableNames(KylinConfig.getInstanceFromEnv());
-        if (!args[0].toLowerCase().equals("-from")) {
+        if (!args[0].toLowerCase(Locale.ROOT).equals("-from")) {
             printUsageAndExit();
         }
-        String oldHostValue = args[1].toLowerCase();
-        String filterType = args[2].toLowerCase();
+        String oldHostValue = args[1].toLowerCase(Locale.ROOT);
+        String filterType = args[2].toLowerCase(Locale.ROOT);
         if (filterType.equals("-table")) {
             tableNames = filterByTables(tableNames, Arrays.asList(args).subList(3, args.length));
         } else if (filterType.equals("-cube")) {
@@ -78,7 +83,7 @@ public class UpdateHTableHostCLI {
         } else if (!filterType.equals("-all")) {
             printUsageAndExit();
         }
-        logger.info("These htables are needed to be updated: " + StringUtils.join(tableNames, ","));
+        logger.info("These htables are needed to be updated: {}", StringUtils.join(tableNames, ","));
 
         UpdateHTableHostCLI updateHTableHostCLI = new UpdateHTableHostCLI(tableNames, oldHostValue);
         updateHTableHostCLI.execute();
@@ -115,13 +120,13 @@ public class UpdateHTableHostCLI {
     private static List<String> getHTableNames(KylinConfig config) {
         CubeManager cubeMgr = CubeManager.getInstance(config);
 
-        ArrayList<String> result = new ArrayList<String>();
+        ArrayList<String> result = new ArrayList<>();
         for (CubeInstance cube : cubeMgr.listAllCubes()) {
             for (CubeSegment seg : cube.getSegments(SegmentStatusEnum.READY)) {
                 String tableName = seg.getStorageLocationIdentifier();
                 if (!StringUtils.isBlank(tableName)) {
                     result.add(tableName);
-                    System.out.println("added new table: " + tableName);
+                    logger.info("added new table: {}", tableName);
                 }
             }
         }
@@ -166,9 +171,9 @@ public class UpdateHTableHostCLI {
         HTableDescriptor desc = hbaseAdmin.getTableDescriptor(TableName.valueOf(tableName));
         if (oldHostValue.equals(desc.getValue(IRealizationConstants.HTableTag))) {
             desc.setValue(IRealizationConstants.HTableTag, kylinConfig.getMetadataUrlPrefix());
-            hbaseAdmin.disableTable(tableName);
-            hbaseAdmin.modifyTable(tableName, desc);
-            hbaseAdmin.enableTable(tableName);
+            hbaseAdmin.disableTable(TableName.valueOf(tableName));
+            hbaseAdmin.modifyTable(TableName.valueOf(tableName), desc);
+            hbaseAdmin.enableTable(TableName.valueOf(tableName));
 
             updatedResources.add(tableName);
         }

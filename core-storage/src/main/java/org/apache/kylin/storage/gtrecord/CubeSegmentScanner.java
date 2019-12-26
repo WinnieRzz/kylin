@@ -21,27 +21,28 @@ package org.apache.kylin.storage.gtrecord;
 import java.io.IOException;
 import java.util.Collection;
 import java.util.Iterator;
+import java.util.List;
 import java.util.Set;
 
-import org.apache.kylin.common.KylinConfig;
 import org.apache.kylin.cube.CubeSegment;
 import org.apache.kylin.cube.cuboid.Cuboid;
-import org.apache.kylin.dict.BuildInFunctionTransformer;
+import org.apache.kylin.dict.BuiltInFunctionTransformer;
 import org.apache.kylin.gridtable.GTInfo;
 import org.apache.kylin.gridtable.GTRecord;
-import org.apache.kylin.gridtable.GTScanRangePlanner;
 import org.apache.kylin.gridtable.GTScanRequest;
-import org.apache.kylin.gridtable.IGTScanner;
-import org.apache.kylin.gridtable.ScannerWorker;
+import org.apache.kylin.metadata.expression.TupleExpression;
 import org.apache.kylin.metadata.filter.ITupleFilterTransformer;
+import org.apache.kylin.metadata.filter.StringCodeSystem;
 import org.apache.kylin.metadata.filter.TupleFilter;
+import org.apache.kylin.metadata.filter.TupleFilterSerializer;
+import org.apache.kylin.metadata.model.DynamicFunctionDesc;
 import org.apache.kylin.metadata.model.FunctionDesc;
 import org.apache.kylin.metadata.model.TblColRef;
 import org.apache.kylin.storage.StorageContext;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-public class CubeSegmentScanner implements IGTScanner {
+public class CubeSegmentScanner implements Iterable<GTRecord> {
 
     private static final Logger logger = LoggerFactory.getLogger(CubeSegmentScanner.class);
 
@@ -51,30 +52,44 @@ public class CubeSegmentScanner implements IGTScanner {
 
     final GTScanRequest scanRequest;
 
-    public CubeSegmentScanner(CubeSegment cubeSeg, Cuboid cuboid, Set<TblColRef> dimensions, Set<TblColRef> groups, //
-            Collection<FunctionDesc> metrics, TupleFilter filter, StorageContext context, String gtStorage) {
+    public CubeSegmentScanner(CubeSegment cubeSeg, Cuboid cuboid, Set<TblColRef> dimensions, //
+            Set<TblColRef> groups, List<TblColRef> dynGroups, List<TupleExpression> dynGroupExprs, //
+            Collection<FunctionDesc> metrics, List<DynamicFunctionDesc> dynFuncs, //
+            TupleFilter originalfilter, TupleFilter havingFilter, StorageContext context) {
+
+        logger.info("Init CubeSegmentScanner for segment {}", cubeSeg.getName());
+
         this.cuboid = cuboid;
         this.cubeSeg = cubeSeg;
 
+        //the filter might be changed later in this CubeSegmentScanner (In ITupleFilterTransformer)
+        //to avoid issues like in https://issues.apache.org/jira/browse/KYLIN-1954, make sure each CubeSegmentScanner
+        //is working on its own copy
+        byte[] serialize = TupleFilterSerializer.serialize(originalfilter, StringCodeSystem.INSTANCE);
+        TupleFilter filter = TupleFilterSerializer.deserialize(serialize, StringCodeSystem.INSTANCE);
+
         // translate FunctionTupleFilter to IN clause
-        ITupleFilterTransformer translator = new BuildInFunctionTransformer(cubeSeg.getDimensionEncodingMap());
+        ITupleFilterTransformer translator = new BuiltInFunctionTransformer(cubeSeg.getDimensionEncodingMap());
         filter = translator.transform(filter);
 
-        String plannerName = KylinConfig.getInstanceFromEnv().getQueryStorageVisitPlanner();
-        GTScanRangePlanner scanRangePlanner;
+        CubeScanRangePlanner scanRangePlanner;
         try {
-            scanRangePlanner = (GTScanRangePlanner) Class.forName(plannerName).getConstructor(CubeSegment.class, Cuboid.class, TupleFilter.class, Set.class, Set.class, Collection.class).newInstance(cubeSeg, cuboid, filter, dimensions, groups, metrics);
+            scanRangePlanner = new CubeScanRangePlanner(cubeSeg, cuboid, filter, dimensions, groups, dynGroups,
+                    dynGroupExprs, metrics, dynFuncs, havingFilter, context);
+        } catch (RuntimeException e) {
+            throw e;
         } catch (Exception e) {
             throw new RuntimeException(e);
         }
+
         scanRequest = scanRangePlanner.planScanRequest();
-        if (scanRequest != null) {
-            scanRequest.setAllowPreAggregation(context.isNeedStorageAggregation());
-            scanRequest.setAggrCacheGB(cubeSeg.getCubeInstance().getConfig().getQueryCoprocessorMemGB());
-            if (context.isLimitEnabled())
-                scanRequest.setRowLimit(context.getLimit());
-        }
-        scanner = new ScannerWorker(cubeSeg, cuboid, scanRequest, gtStorage);
+
+        String gtStorage = ((GTCubeStorageQueryBase) context.getStorageQuery()).getGTStorage();
+        scanner = new ScannerWorker(cubeSeg, cuboid, scanRequest, gtStorage, context);
+    }
+
+    public boolean isSegmentSkipped() {
+        return scanner.isSegmentSkipped();
     }
 
     @Override
@@ -82,19 +97,15 @@ public class CubeSegmentScanner implements IGTScanner {
         return scanner.iterator();
     }
 
-    @Override
     public void close() throws IOException {
         scanner.close();
     }
 
-    @Override
     public GTInfo getInfo() {
         return scanRequest == null ? null : scanRequest.getInfo();
     }
 
-    @Override
-    public long getScannedRowCount() {
-        return scanner.getScannedRowCount();
+    public GTScanRequest getScanRequest() {
+        return scanRequest;
     }
-
 }

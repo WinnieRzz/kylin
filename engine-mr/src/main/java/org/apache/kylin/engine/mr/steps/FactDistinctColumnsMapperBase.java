@@ -30,57 +30,59 @@ import org.apache.kylin.cube.CubeManager;
 import org.apache.kylin.cube.CubeSegment;
 import org.apache.kylin.cube.cuboid.Cuboid;
 import org.apache.kylin.cube.model.CubeDesc;
-import org.apache.kylin.cube.model.CubeJoinedFlatTableDesc;
+import org.apache.kylin.cube.model.CubeJoinedFlatTableEnrich;
+import org.apache.kylin.engine.EngineFactory;
 import org.apache.kylin.engine.mr.IMRInput.IMRTableInputFormat;
 import org.apache.kylin.engine.mr.KylinMapper;
 import org.apache.kylin.engine.mr.MRUtil;
 import org.apache.kylin.engine.mr.common.AbstractHadoopJob;
 import org.apache.kylin.engine.mr.common.BatchConstants;
-import org.apache.kylin.metadata.model.SegmentStatusEnum;
 import org.apache.kylin.metadata.model.TblColRef;
 
 /**
  */
-public class FactDistinctColumnsMapperBase<KEYIN, VALUEIN> extends KylinMapper<KEYIN, VALUEIN, Text, Text> {
+abstract public class FactDistinctColumnsMapperBase<KEYIN, VALUEIN> extends KylinMapper<KEYIN, VALUEIN, SelfDefineSortableKey, Text> {
 
     protected String cubeName;
     protected CubeInstance cube;
     protected CubeSegment cubeSeg;
     protected CubeDesc cubeDesc;
     protected long baseCuboidId;
-    protected List<TblColRef> factDictCols;
     protected IMRTableInputFormat flatTableInputFormat;
+    protected List<TblColRef> allCols;
 
     protected Text outputKey = new Text();
     protected Text outputValue = new Text();
     protected int errorRecordCounter = 0;
 
-    protected CubeJoinedFlatTableDesc intermediateTableDesc;
-    protected int[] dictionaryColumnIndex;
+    protected CubeJoinedFlatTableEnrich intermediateTableDesc;
+    protected int[] columnIndex;
 
+    protected FactDistinctColumnsReducerMapping reducerMapping;
+    
     @Override
-    protected void setup(Context context) throws IOException {
+    protected void doSetup(Context context) throws IOException {
         Configuration conf = context.getConfiguration();
         bindCurrentConfiguration(conf);
         KylinConfig config = AbstractHadoopJob.loadKylinPropsAndMetadata();
 
         cubeName = conf.get(BatchConstants.CFG_CUBE_NAME);
         cube = CubeManager.getInstance(config).getCube(cubeName);
-        cubeSeg = cube.getSegment(conf.get(BatchConstants.CFG_CUBE_SEGMENT_NAME), SegmentStatusEnum.NEW);
+        cubeSeg = cube.getSegmentById(conf.get(BatchConstants.CFG_CUBE_SEGMENT_ID));
         cubeDesc = cube.getDescriptor();
         baseCuboidId = Cuboid.getBaseCuboidId(cubeDesc);
-        factDictCols = CubeManager.getInstance(config).getAllDictColumnsOnFact(cubeDesc);
+        reducerMapping = new FactDistinctColumnsReducerMapping(cube);
+        allCols = reducerMapping.getAllDimDictCols();
 
         flatTableInputFormat = MRUtil.getBatchCubingInputSide(cubeSeg).getFlatTableInputFormat();
 
-        intermediateTableDesc = new CubeJoinedFlatTableDesc(cubeDesc, null);
-        dictionaryColumnIndex = new int[factDictCols.size()];
-        for (int i = 0; i < factDictCols.size(); i++) {
-            TblColRef colRef = factDictCols.get(i);
+        intermediateTableDesc = new CubeJoinedFlatTableEnrich(EngineFactory.getJoinedFlatTableDesc(cubeSeg), cubeDesc);
+        columnIndex = new int[allCols.size()];
+        for (int i = 0; i < allCols.size(); i++) {
+            TblColRef colRef = allCols.get(i);
             int columnIndexOnFlatTbl = intermediateTableDesc.getColumnIndex(colRef);
-            dictionaryColumnIndex[i] = columnIndexOnFlatTbl;
+            columnIndex[i] = columnIndexOnFlatTbl;
         }
-
     }
 
     protected void handleErrorRecord(String[] record, Exception ex) throws IOException {
@@ -89,7 +91,7 @@ public class FactDistinctColumnsMapperBase<KEYIN, VALUEIN> extends KylinMapper<K
         ex.printStackTrace(System.err);
 
         errorRecordCounter++;
-        if (errorRecordCounter > BatchConstants.ERROR_RECORD_LOG_THRESHOLD) {
+        if (errorRecordCounter > cubeSeg.getConfig().getErrorRecordThreshold()) {
             if (ex instanceof IOException)
                 throw (IOException) ex;
             else if (ex instanceof RuntimeException)

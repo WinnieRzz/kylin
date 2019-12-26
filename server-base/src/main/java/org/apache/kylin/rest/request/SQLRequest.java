@@ -19,18 +19,28 @@
 package org.apache.kylin.rest.request;
 
 import java.io.Serializable;
+import java.util.Locale;
 import java.util.Map;
 
+import com.google.common.collect.Lists;
+
+/**
+ * if you're adding/removing fields from SQLRequest, take a look at getCacheKey
+ */
 public class SQLRequest implements Serializable {
     protected static final long serialVersionUID = 1L;
 
     private String sql;
+
     private String project;
+    private String username = "";
     private Integer offset = 0;
     private Integer limit = 0;
     private boolean acceptPartial = false;
 
     private Map<String, String> backdoorToggles;
+
+    protected volatile Object cacheKey = null;
 
     public SQLRequest() {
     }
@@ -51,6 +61,14 @@ public class SQLRequest implements Serializable {
         this.project = project;
     }
 
+    public String getUsername() {
+        return username;
+    }
+
+    public void setUsername(String username) {
+        this.username = username;
+    }
+
     public String getSql() {
         return sql;
     }
@@ -60,7 +78,7 @@ public class SQLRequest implements Serializable {
     }
 
     public Integer getOffset() {
-        return offset;
+        return offset == null ? 0 : offset;
     }
 
     public void setOffset(Integer offset) {
@@ -68,7 +86,7 @@ public class SQLRequest implements Serializable {
     }
 
     public Integer getLimit() {
-        return limit;
+        return limit == null ? 0 : limit;
     }
 
     public void setLimit(Integer limit) {
@@ -83,50 +101,55 @@ public class SQLRequest implements Serializable {
         this.acceptPartial = acceptPartial;
     }
 
+    public Object getCacheKey() {
+        if (cacheKey != null)
+            return cacheKey;
+
+        cacheKey = Lists.newArrayList(sql.replaceAll("[ ]", " ") //
+                , getNormProject() //
+                , offset //
+                , limit //
+                , acceptPartial //
+                , backdoorToggles //
+                , username);
+        return cacheKey;
+    }
+
+    @Override
+    public boolean equals(Object o) {
+        if (this == o)
+            return true;
+        if (o == null || getClass() != o.getClass())
+            return false;
+
+        SQLRequest that = (SQLRequest) o;
+
+        if (acceptPartial != that.acceptPartial)
+            return false;
+        if (sql != null ? !sql.equals(that.sql) : that.sql != null)
+            return false;
+        if (getNormProject() != null ? !getNormProject().equals(that.getNormProject()) : that.getNormProject() != null)
+            return false;
+        if (offset != null ? !offset.equals(that.offset) : that.offset != null)
+            return false;
+        if (limit != null ? !limit.equals(that.limit) : that.limit != null)
+            return false;
+        return backdoorToggles != null ? backdoorToggles.equals(that.backdoorToggles) : that.backdoorToggles == null;
+
+    }
+
     @Override
     public int hashCode() {
-        final int prime = 31;
-        int result = 1;
-        result = prime * result + (acceptPartial ? 1231 : 1237);
-        result = prime * result + ((offset == null) ? 0 : offset.hashCode());
-        result = prime * result + ((limit == null) ? 0 : limit.hashCode());
-        result = prime * result + ((project == null) ? 0 : project.hashCode());
-        result = prime * result + ((sql == null) ? 0 : sql.hashCode());
+        int result = sql != null ? sql.hashCode() : 0;
+        result = 31 * result + (getNormProject() != null ? getNormProject().hashCode() : 0);
+        result = 31 * result + (offset != null ? offset.hashCode() : 0);
+        result = 31 * result + (limit != null ? limit.hashCode() : 0);
+        result = 31 * result + (acceptPartial ? 1 : 0);
+        result = 31 * result + (backdoorToggles != null ? backdoorToggles.hashCode() : 0);
         return result;
     }
 
-    @Override
-    public boolean equals(Object obj) {
-        if (this == obj)
-            return true;
-        if (obj == null)
-            return false;
-        if (getClass() != obj.getClass())
-            return false;
-        SQLRequest other = (SQLRequest) obj;
-        if (acceptPartial != other.acceptPartial)
-            return false;
-        if (offset == null) {
-            if (other.offset != null)
-                return false;
-        } else if (!offset.equals(other.offset))
-            return false;
-        if (limit == null) {
-            if (other.limit != null)
-                return false;
-        } else if (!limit.equals(other.limit))
-            return false;
-        if (project == null) {
-            if (other.project != null)
-                return false;
-        } else if (!project.equals(other.project))
-            return false;
-        if (sql == null) {
-            if (other.sql != null)
-                return false;
-        } else if (!sql.equals(other.sql))
-            return false;
-        return true;
+    private String getNormProject() {
+        return project == null ? null : project.toUpperCase(Locale.ROOT);
     }
-
 }

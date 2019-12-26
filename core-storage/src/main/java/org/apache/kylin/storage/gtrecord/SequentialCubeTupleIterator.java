@@ -19,155 +19,140 @@
 package org.apache.kylin.storage.gtrecord;
 
 import java.io.IOException;
+import java.util.Comparator;
 import java.util.Iterator;
 import java.util.List;
-import java.util.NoSuchElementException;
 import java.util.Set;
+import java.util.TreeSet;
 
+import com.google.common.collect.Sets;
+import org.apache.kylin.common.QueryContextFacade;
 import org.apache.kylin.cube.cuboid.Cuboid;
-import org.apache.kylin.gridtable.GTRecord;
-import org.apache.kylin.measure.MeasureType.IAdvMeasureFiller;
 import org.apache.kylin.metadata.model.FunctionDesc;
 import org.apache.kylin.metadata.model.TblColRef;
+import org.apache.kylin.metadata.realization.SQLDigest;
 import org.apache.kylin.metadata.tuple.ITuple;
 import org.apache.kylin.metadata.tuple.ITupleIterator;
-import org.apache.kylin.metadata.tuple.Tuple;
 import org.apache.kylin.metadata.tuple.TupleInfo;
 import org.apache.kylin.storage.StorageContext;
-import org.apache.kylin.storage.exception.ScanOutOfLimitException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import com.google.common.base.Preconditions;
+import com.google.common.collect.Iterators;
+import com.google.common.collect.Lists;
 
 public class SequentialCubeTupleIterator implements ITupleIterator {
 
     private static final Logger logger = LoggerFactory.getLogger(SequentialCubeTupleIterator.class);
 
-    protected final Cuboid cuboid;
-    protected final Set<TblColRef> selectedDimensions;
-    protected final Set<FunctionDesc> selectedMetrics;
-    protected final TupleInfo tupleInfo;
-    protected final Tuple tuple;
-    protected final Iterator<CubeSegmentScanner> scannerIterator;
-    protected final StorageContext context;
-
-    protected CubeSegmentScanner curScanner;
-    protected Iterator<GTRecord> curRecordIterator;
-    protected CubeTupleConverter curTupleConverter;
-    protected Tuple next;
-
-    private List<IAdvMeasureFiller> advMeasureFillers;
-    private int advMeasureRowsRemaining;
-    private int advMeasureRowIndex;
+    protected List<CubeSegmentScanner> scanners;
+    protected List<SegmentCubeTupleIterator> segmentCubeTupleIterators;
+    protected Iterator<ITuple> tupleIterator;
+    protected StorageContext context;
 
     private int scanCount;
     private int scanCountDelta;
 
-    public SequentialCubeTupleIterator(List<CubeSegmentScanner> scanners, Cuboid cuboid, Set<TblColRef> selectedDimensions, //
-            Set<FunctionDesc> selectedMetrics, TupleInfo returnTupleInfo, StorageContext context) {
-        this.cuboid = cuboid;
-        this.selectedDimensions = selectedDimensions;
-        this.selectedMetrics = selectedMetrics;
-        this.tupleInfo = returnTupleInfo;
-        this.tuple = new Tuple(returnTupleInfo);
-        this.scannerIterator = scanners.iterator();
+    public SequentialCubeTupleIterator(List<CubeSegmentScanner> scanners, Cuboid cuboid,
+            Set<TblColRef> selectedDimensions, List<TblColRef> rtGroups, Set<TblColRef> groups, //
+            Set<FunctionDesc> selectedMetrics, TupleInfo returnTupleInfo, StorageContext context, SQLDigest sqlDigest) {
         this.context = context;
+        this.scanners = scanners;
+
+        Set<TblColRef> selectedDims = Sets.newHashSet(selectedDimensions);
+        selectedDims.addAll(rtGroups);
+
+        segmentCubeTupleIterators = Lists.newArrayList();
+        for (CubeSegmentScanner scanner : scanners) {
+            segmentCubeTupleIterators.add(new SegmentCubeTupleIterator(scanner, cuboid, selectedDims, selectedMetrics, returnTupleInfo, context));
+        }
+
+        if (context.mergeSortPartitionResults() && !sqlDigest.isRawQuery) {
+            //query with limit
+            logger.info("Using SortedIteratorMergerWithLimit to merge segment results");
+            Iterator<Iterator<ITuple>> transformed = (Iterator<Iterator<ITuple>>) (Iterator<?>) segmentCubeTupleIterators.iterator();
+            tupleIterator = new SortedIteratorMergerWithLimit<ITuple>(transformed, context.getFinalPushDownLimit(), getTupleDimensionComparator(cuboid, groups, returnTupleInfo)).getIterator();
+        } else {
+            //normal case
+            logger.info("Using Iterators.concat to merge segment results");
+            tupleIterator = Iterators.concat(segmentCubeTupleIterators.iterator());
+        }
+    }
+
+    public Comparator<ITuple> getTupleDimensionComparator(Cuboid cuboid, Set<TblColRef> groups, TupleInfo returnTupleInfo) {
+        // dimensionIndexOnTuple is for SQL with limit
+        List<TblColRef> dimColumns = cuboid.getColumns();
+
+        TreeSet<Integer> groupIndexOnDim = new TreeSet<>();
+        for (TblColRef colRef: groups) {
+            groupIndexOnDim.add(dimColumns.indexOf(colRef));
+        }
+
+        List<Integer> temp = Lists.newArrayList();
+        for (Integer index: groupIndexOnDim) {
+            TblColRef dim = dimColumns.get(index);
+            if (returnTupleInfo.hasColumn(dim)) {
+                temp.add(returnTupleInfo.getColumnIndex(dim));
+            }
+        }
+
+        final int[] dimensionIndexOnTuple = new int[temp.size()];
+        for (int i = 0; i < temp.size(); i++) {
+            dimensionIndexOnTuple[i] = temp.get(i);
+        }
+
+        return new Comparator<ITuple>() {
+            @Override
+            public int compare(ITuple o1, ITuple o2) {
+                Preconditions.checkNotNull(o1);
+                Preconditions.checkNotNull(o2);
+                for (int i = 0; i < dimensionIndexOnTuple.length; i++) {
+                    int index = dimensionIndexOnTuple[i];
+
+                    if (index == -1) {
+                        //TODO: 
+                        continue;
+                    }
+
+                    Comparable a = (Comparable) o1.getAllValues()[index];
+                    Comparable b = (Comparable) o2.getAllValues()[index];
+
+                    if (a == null && b == null) {
+                        continue;
+                    } else if (a == null) {
+                        return 1;
+                    } else if (b == null) {
+                        return -1;
+                    } else {
+                        int temp = a.compareTo(b);
+                        if (temp != 0) {
+                            return temp;
+                        } else {
+                            continue;
+                        }
+                    }
+                }
+
+                return 0;
+            }
+        };
     }
 
     @Override
     public boolean hasNext() {
-        if (next != null)
-            return true;
-
-        if (hitLimitAndThreshold())
-            return false;
-
-        // consume any left rows from advanced measure filler
-        if (advMeasureRowsRemaining > 0) {
-            for (IAdvMeasureFiller filler : advMeasureFillers) {
-                filler.fillTuple(tuple, advMeasureRowIndex);
-            }
-            advMeasureRowIndex++;
-            advMeasureRowsRemaining--;
-            next = tuple;
-            return true;
-        }
-
-        // get the next GTRecord
-        if (curScanner == null) {
-            if (scannerIterator.hasNext()) {
-                curScanner = scannerIterator.next();
-                curRecordIterator = curScanner.iterator();
-                if (curRecordIterator.hasNext()) {
-                    //if the segment does not has any tuples, don't bother to create a converter
-                    curTupleConverter = new CubeTupleConverter(curScanner.cubeSeg, cuboid, selectedDimensions, selectedMetrics, tupleInfo);
-                }
-            } else {
-                return false;
-            }
-        }
-        if (curRecordIterator.hasNext() == false) {
-            close(curScanner);
-            curScanner = null;
-            curRecordIterator = null;
-            curTupleConverter = null;
-            return hasNext();
-        }
-
-        // now we have a GTRecord
-        GTRecord curRecord = curRecordIterator.next();
-
-        // translate into tuple
-        advMeasureFillers = curTupleConverter.translateResult(curRecord, tuple);
-
-        // the simple case
-        if (advMeasureFillers == null) {
-            next = tuple;
-            return true;
-        }
-
-        // advanced measure filling, like TopN, will produce multiple tuples out of one record
-        advMeasureRowsRemaining = -1;
-        for (IAdvMeasureFiller filler : advMeasureFillers) {
-            if (advMeasureRowsRemaining < 0)
-                advMeasureRowsRemaining = filler.getNumOfRows();
-            if (advMeasureRowsRemaining != filler.getNumOfRows())
-                throw new IllegalStateException();
-        }
-        if (advMeasureRowsRemaining < 0)
-            throw new IllegalStateException();
-
-        advMeasureRowIndex = 0;
-        return hasNext();
-    }
-
-    private boolean hitLimitAndThreshold() {
-        // check limit
-        if (context.isLimitEnabled() && scanCount >= context.getLimit() + context.getOffset()) {
-            return true;
-        }
-        // check threshold
-        if (scanCount >= context.getThreshold()) {
-            throw new ScanOutOfLimitException("Scan row count exceeded threshold: " + context.getThreshold() + ", please add filter condition to narrow down backend scan range, like where clause.");
-        }
-        return false;
+        return tupleIterator.hasNext();
     }
 
     @Override
     public ITuple next() {
-        // fetch next record
-        if (next == null) {
-            hasNext();
-            if (next == null)
-                throw new NoSuchElementException();
+        if (scanCount++ % 100 == 1) {
+            QueryContextFacade.current().checkMillisBeforeDeadline();
         }
-
-        scanCount++;
-        if (++scanCountDelta >= 1000)
+        if (++scanCountDelta >= 1000) {
             flushScanCountDelta();
-
-        ITuple result = next;
-        next = null;
-        return result;
+        }
+        return tupleIterator.next();
     }
 
     @Override
@@ -181,11 +166,8 @@ public class SequentialCubeTupleIterator implements ITupleIterator {
         // close all the remaining segmentIterator
         flushScanCountDelta();
 
-        if (curScanner != null)
-            close(curScanner);
-
-        while (scannerIterator.hasNext()) {
-            close(scannerIterator.next());
+        for (SegmentCubeTupleIterator iterator : segmentCubeTupleIterators) {
+            iterator.close();
         }
     }
 
@@ -197,12 +179,8 @@ public class SequentialCubeTupleIterator implements ITupleIterator {
         }
     }
 
-    public int getScanCount() {
-        return scanCount;
-    }
-
     private void flushScanCountDelta() {
-        context.increaseTotalScanCount(scanCountDelta);
+        context.increaseProcessedRowCount(scanCountDelta);
         scanCountDelta = 0;
     }
 

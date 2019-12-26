@@ -18,67 +18,149 @@
 
 package org.apache.kylin.metadata.model;
 
+import static com.google.common.base.Preconditions.checkArgument;
+
 import java.io.Serializable;
+import java.util.List;
+import java.util.Locale;
+import java.util.function.Function;
 
 import org.apache.commons.lang.StringUtils;
 import org.apache.kylin.metadata.datatype.DataType;
+import org.apache.kylin.metadata.expression.TupleExpression;
 
 /**
  */
-@SuppressWarnings("serial")
+@SuppressWarnings({ "serial" })
 public class TblColRef implements Serializable {
 
     private static final String INNER_TABLE_NAME = "_kylin_table";
+    private static final DataModelDesc UNKNOWN_MODEL = new DataModelDesc();
 
-    // used by projection rewrite, see OLAPProjectRel
-    public enum InnerDataTypeEnum {
-
-        LITERAL("_literal_type"), DERIVED("_derived_type");
-
-        private final String dateType;
-
-        private InnerDataTypeEnum(String name) {
-            this.dateType = name;
-        }
-
-        public String getDataType() {
-            return dateType;
-        }
-
-        public static boolean contains(String name) {
-            return LITERAL.getDataType().equals(name) || DERIVED.getDataType().equals(name);
-        }
+    static {
+        UNKNOWN_MODEL.setName("UNKNOWN_MODEL");
     }
+
+    private TableRef table;
+    private TableRef backupTable;// only used in fixTableRef()
+    private ColumnDesc column;
+    private String identity;
+    private String parserDescription;
+    //used in window function
+    private List<TupleExpression> subTupleExps;
+    /**
+     * Function used to get quoted identitier
+     */
+    private transient Function<TblColRef, String> quotedFunc;
+
+    TblColRef(ColumnDesc column) {
+        this.column = column;
+    }
+
+    TblColRef(TableRef table, ColumnDesc column) {
+        checkArgument(table.getTableDesc().getIdentity().equals(column.getTable().getIdentity()));
+        this.table = table;
+        this.column = column;
+    }
+
+    // ============================================================================
 
     // used by projection rewrite, see OLAPProjectRel
     public static TblColRef newInnerColumn(String columnName, InnerDataTypeEnum dataType) {
+        return newInnerColumn(columnName, dataType, null);
+    }
+
+    // used by projection rewrite, see OLAPProjectRel
+    public static TblColRef newInnerColumn(String columnName, InnerDataTypeEnum dataType, String parserDescription) {
         ColumnDesc column = new ColumnDesc();
         column.setName(columnName);
         TableDesc table = new TableDesc();
         column.setTable(table);
         TblColRef colRef = new TblColRef(column);
         colRef.markInnerColumn(dataType);
+        colRef.parserDescription = parserDescription;
         return colRef;
     }
 
-    // ============================================================================
+    public static TableRef tableForUnknownModel(String tempTableAlias, TableDesc table) {
+        return new TableRef(UNKNOWN_MODEL, tempTableAlias, table, false);
+    }
 
-    private ColumnDesc column;
+    public static TblColRef columnForUnknownModel(TableRef table, ColumnDesc colDesc) {
+        checkArgument(table.getModel() == UNKNOWN_MODEL);
+        return new TblColRef(table, colDesc);
+    }
 
-    TblColRef(ColumnDesc column) {
-        this.column = column;
+    public static void fixUnknownModel(DataModelDesc model, String alias, TblColRef col) {
+        checkArgument(col.table.getModel() == UNKNOWN_MODEL || col.table.getModel() == model);
+        TableRef tableRef = model.findTable(alias);
+        checkArgument(tableRef.getTableDesc().getIdentity().equals(col.column.getTable().getIdentity()));
+        col.fixTableRef(tableRef);
+    }
+
+    public static void unfixUnknownModel(TblColRef col) {
+        col.unfixTableRef();
+    }
+
+    // for test mainly
+    public static TblColRef mockup(TableDesc table, int oneBasedColumnIndex, String name, String datatype) {
+        return mockup(table, oneBasedColumnIndex, name, datatype, null);
+    }
+
+    // for test mainly
+    public static TblColRef mockup(TableDesc table, int oneBasedColumnIndex, String name, String datatype,
+            String comment) {
+        ColumnDesc desc = new ColumnDesc();
+        String id = "" + oneBasedColumnIndex;
+        desc.setId(id);
+        desc.setName(name);
+        desc.setDatatype(datatype);
+        desc.init(table);
+        desc.setComment(comment);
+        return new TblColRef(desc);
+    }
+
+    public void setQuotedFunc(Function<TblColRef, String> quotedFunc) {
+        this.quotedFunc = quotedFunc;
+    }
+
+    public void fixTableRef(TableRef tableRef) {
+        this.backupTable = this.table;
+        this.table = tableRef;
+        this.identity = null;
     }
 
     public ColumnDesc getColumnDesc() {
         return column;
     }
 
-    public void setColumn(ColumnDesc column) {
-        this.column = column;
+    public void unfixTableRef() {
+        this.table = backupTable;
+        this.identity = null;
     }
 
     public String getName() {
         return column.getName();
+    }
+
+    public TableRef getTableRef() {
+        return table;
+    }
+
+    public boolean isQualified() {
+        return table != null;
+    }
+
+    public String getTableAlias() {
+        return table != null ? table.getAlias() : "UNKNOWN_ALIAS";
+    }
+
+    public String getExpressionInSourceDB() {
+        if (!column.isComputedColumn()) {
+            return getIdentity();
+        } else {
+            return column.getComputedColumnExpr();
+        }
     }
 
     public String getTable() {
@@ -100,7 +182,19 @@ public class TblColRef implements Serializable {
         return column.getType();
     }
 
-    public void markInnerColumn(InnerDataTypeEnum dataType) {
+    public List<TupleExpression> getSubTupleExps() {
+        return subTupleExps;
+    }
+
+    public void setSubTupleExps(List<TupleExpression> subTubleExps) {
+        this.subTupleExps = subTubleExps;
+    }
+
+    public String getBackupTableAlias() {
+        return backupTable.getAlias();
+    }
+
+    private void markInnerColumn(InnerDataTypeEnum dataType) {
         this.column.setDatatype(dataType.getDataType());
         this.column.getTable().setName(INNER_TABLE_NAME);
         this.column.getTable().setDatabase("DEFAULT");
@@ -110,22 +204,9 @@ public class TblColRef implements Serializable {
         return InnerDataTypeEnum.contains(getDatatype());
     }
 
-    public boolean isDerivedDataType() {
-        return InnerDataTypeEnum.DERIVED.getDataType().equals(getDatatype());
-    }
-
-    /**
-     *
-     * @param tableName full name : db.table
-     * @param columnName columnname
-     * @return
-     */
-    public boolean isSameAs(String tableName, String columnName) {
-        return column.isSameAs(tableName, columnName);
-    }
-
-    @Override
     public int hashCode() {
+        // NOTE: tableRef MUST NOT participate in hashCode().
+        // Because fixUnknownModel() can change tableRef while TblColRef is held as set/map keys.
         final int prime = 31;
         int result = 1;
 
@@ -147,11 +228,79 @@ public class TblColRef implements Serializable {
             return false;
         if (!StringUtils.equals(column.getName(), other.column.getName()))
             return false;
+        if ((table == null ? other.table == null : table.equals(other.table)) == false)
+            return false;
+        if (this.isInnerColumn() != other.isInnerColumn())
+            return false;
         return true;
+    }
+
+    public String getIdentity() {
+        if (identity == null)
+            identity = getTableAlias() + "." + getName();
+        return identity;
+    }
+
+    public String getQuotedIdentity() {
+        if (quotedFunc == null)
+            return getIdentity();
+        else
+            return quotedFunc.apply(this);
     }
 
     @Override
     public String toString() {
-        return (column.getTable() == null ? null : column.getTable().getIdentity()) + "." + column.getName();
+        if (isInnerColumn() && parserDescription != null)
+            return parserDescription;
+
+        String alias = table == null ? "UNKNOWN_MODEL" : table.getAlias();
+        String tableName = column.getTable() == null ? "NULL" : column.getTable().getName();
+        String tableIdentity = column.getTable() == null ? "NULL" : column.getTable().getIdentity();
+        if (alias.equals(tableName)) {
+            return tableIdentity + "." + column.getName();
+        } else {
+            return alias + ":" + tableIdentity + "." + column.getName();
+        }
+    }
+
+    // return DB.TABLE
+    public String getTableWithSchema() {
+        if (isInnerColumn() && parserDescription != null)
+            return parserDescription;
+        if (column.getTable() == null) {
+            return "NULL";
+        } else {
+            return column.getTable().getIdentity().toUpperCase(Locale.ROOT);
+        }
+    }
+
+    // return DB.TABLE.COLUMN
+    public String getColumWithTableAndSchema() {
+        return (getTableWithSchema() + "." + column.getName()).toUpperCase(Locale.ROOT);
+    }
+
+
+    public String getColumnWithTable() {
+        return (getTable() + "." + column.getName()).toUpperCase(Locale.ROOT);
+    }
+
+    // used by projection rewrite, see OLAPProjectRel
+    public enum InnerDataTypeEnum {
+
+        LITERAL("_literal_type"), DERIVED("_derived_type");
+
+        private final String dateType;
+
+        private InnerDataTypeEnum(String name) {
+            this.dateType = name;
+        }
+
+        public static boolean contains(String name) {
+            return LITERAL.getDataType().equals(name) || DERIVED.getDataType().equals(name);
+        }
+
+        public String getDataType() {
+            return dateType;
+        }
     }
 }
